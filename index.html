@@ -3,32 +3,63 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Parental Control Dashboard</title>
+    <title>Parental Control Dashboard with OpenLayers</title>
     <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.development.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.development.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.22.5/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.43.4/dist/umd/supabase.min.js"></script>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://cdn.jsdelivr.net/npm/ol@7.5.0/dist/ol.js"></script>
     <style>
         .pulse {
-            animation: pulse 2s infinite;
+            animation: pulse 1.5s infinite;
         }
         @keyframes pulse {
             0% { transform: scale(1); opacity: 1; }
-            50% { transform: scale(1.2); opacity: 0.6; }
+            50% { transform: scale(1.5); opacity: 0.3; }
             100% { transform: scale(1); opacity: 1; }
         }
         .custom-marker {
-            background: red;
-            width: 20px;
-            height: 20px;
+            width: 30px;
+            height: 30px;
             border-radius: 50%;
             display: flex;
             align-items: center;
             justify-content: center;
             color: white;
-            font-size: 12px;
+            font-size: 10px;
+            text-align: center;
+            line-height: 30px;
+            position: relative;
+        }
+        .marker-label {
+            position: absolute;
+            top: -40px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            white-space: nowrap;
+            z-index: 10;
+        }
+        .ol-zoom {
+            top: 0.5rem !important;
+            left: 0.5rem !important;
+        }
+        .ol-zoom button {
+            width: 30px !important;
+            height: 30px !important;
+            font-size: 16px !important;
+            margin-bottom: 2px !important;
+            background-color: #f0f0f0 !important;
+            border: 1px solid #ccc !important;
+            border-radius: 4px !important;
+        }
+        .ol-zoom button:hover {
+            background-color: #e0e0e0 !important;
         }
     </style>
 </head>
@@ -58,15 +89,19 @@
             const [audioRecordings, setAudioRecordings] = useState([]);
             const [whatsAppMessages, setWhatsAppMessages] = useState([]);
             const [mapType, setMapType] = useState("standard");
+            const [autoZoomEnabled, setAutoZoomEnabled] = useState(true);
             const mapRef = useRef(null);
             const mapInstance = useRef(null);
-            const markerRef = useRef(null);
+            const markerFeature = useRef(null);
+            const vectorLayer = useRef(null);
             const timeIntervalRef = useRef(null);
+            const pulseIntervalRef = useRef(null);
             const reconnectAttempts = useRef(0);
             const maxReconnectAttempts = 10;
             const baseReconnectDelay = 5000;
             const pollingIntervalRef = useRef(null);
             const selectedDeviceRef = useRef(null);
+            const [isMapLoaded, setIsMapLoaded] = useState(false);
 
             const isValidJSON = (str) => {
                 try {
@@ -82,96 +117,178 @@
             const formatLocalTime = (isoString) => {
                 if (!isoString) return "غير متاح";
                 const date = new Date(isoString);
-                return date.toLocaleString('ar-EG', { 
+                const time = date.toLocaleString('ar-EG', { 
                     timeZone: 'Asia/Baghdad',
                     hour12: false,
                     hour: '2-digit',
                     minute: '2-digit',
                     second: '2-digit'
                 });
+                const dateStr = date.toLocaleDateString('ar-EG', { 
+                    timeZone: 'Asia/Baghdad',
+                    year: 'numeric',
+                    month: 'long',
+                    day: 'numeric'
+                });
+                return `${time} - ${dateStr}`;
             };
 
-            const initializeMap = (lat, lng) => {
-                if (!mapRef.current) {
-                    console.error("mapRef.current is null, map initialization aborted");
+            const initializeMap = (lat = 0, lng = 0) => {
+                if (!mapRef.current || !window.ol) {
+                    console.error("Map initialization failed: mapRef or OpenLayers not available");
                     return;
                 }
-                if (mapInstance.current) {
-                    mapInstance.current.remove();
-                    mapInstance.current = null;
-                }
-                try {
-                    mapInstance.current = L.map(mapRef.current, { zoomControl: true }).setView([lat || 0, lng || 0], lat && lng ? 13 : 2);
-                    
-                    const standardLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                        maxZoom: 19,
-                        attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+                if (mapInstance.current) mapInstance.current.setTarget(null);
+                mapInstance.current = new ol.Map({
+                    target: mapRef.current,
+                    layers: [
+                        new ol.layer.Tile({
+                            source: mapType === "standard" ? new ol.source.OSM() : new ol.source.XYZ({
+                                url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+                                attributions: 'Tiles © Esri — Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'
+                            })
+                        })
+                    ],
+                    view: new ol.View({
+                        center: ol.proj.fromLonLat([lng, lat]),
+                        zoom: lat && lng ? 13 : 2
+                    })
+                });
+
+                const vectorSource = new ol.source.Vector();
+                markerFeature.current = new ol.Feature({
+                    geometry: new ol.geom.Point(ol.proj.fromLonLat([lng, lat]))
+                });
+                updateMarkerStyle();
+                vectorSource.addFeature(markerFeature.current);
+
+                vectorLayer.current = new ol.layer.Vector({
+                    source: vectorSource,
+                    visible: true
+                });
+                mapInstance.current.addLayer(vectorLayer.current);
+
+                setIsMapLoaded(true);
+                console.log("Map and marker initialized at:", lat, lng);
+            };
+
+            const updateMarkerStyle = () => {
+                if (!markerFeature.current) return;
+                const currentState = deviceStates[selectedDevice?.uuid] || {};
+                const isMoving = currentState.liveLocation && currentState.isTracking;
+                const baseRadius = 10;
+                const pulseStyle = new ol.style.Style({
+                    image: new ol.style.Circle({
+                        radius: baseRadius + 5,
+                        fill: new ol.style.Fill({ color: isMoving ? 'rgba(255, 0, 0, 0.3)' : 'rgba(0, 255, 0, 0.3)' }),
+                        stroke: new ol.style.Stroke({ color: isMoving ? 'rgba(255, 0, 0, 0.5)' : 'rgba(0, 255, 0, 0.5)', width: 2 })
+                    }),
+                    zIndex: 0
+                });
+                const markerStyle = new ol.style.Style({
+                    image: new ol.style.Circle({
+                        radius: baseRadius,
+                        fill: new ol.style.Fill({ color: isMoving ? 'rgba(255, 0, 0, 0.8)' : 'rgba(0, 255, 0, 0.8)' }),
+                        stroke: new ol.style.Stroke({ color: 'white', width: 2 })
+                    }),
+                    zIndex: 1
+                });
+                const labelText = `${selectedDevice?.name || selectedDevice?.uuid}\n${formatLocalTime(currentState.liveLocation?.captured_at || currentState.lastKnownLocation?.captured_at || new Date().toISOString())}`;
+                const label = new ol.style.Style({
+                    text: new ol.style.Text({
+                        text: labelText,
+                        font: '10px sans-serif',
+                        fill: new ol.style.Fill({ color: 'white' }),
+                        backgroundFill: new ol.style.Fill({ color: 'rgba(0, 0, 0, 0.7)' }),
+                        padding: [2, 6, 2, 6],
+                        offsetY: -40,
+                        textAlign: 'center',
+                        overflow: true
+                    }),
+                    zIndex: 2
+                });
+                markerFeature.current.setStyle([pulseStyle, markerStyle, label]);
+            };
+
+            const updatePulseAnimation = () => {
+                if (!markerFeature.current || !mapInstance.current) return;
+                let pulseRadius = 10;
+                if (pulseIntervalRef.current) clearInterval(pulseIntervalRef.current);
+                pulseIntervalRef.current = setInterval(() => {
+                    const currentState = deviceStates[selectedDevice?.uuid] || {};
+                    const isMoving = currentState.liveLocation && currentState.isTracking;
+                    const pulseStyle = new ol.style.Style({
+                        image: new ol.style.Circle({
+                            radius: pulseRadius,
+                            fill: new ol.style.Fill({ color: isMoving ? 'rgba(255, 0, 0, 0.3)' : 'rgba(0, 255, 0, 0.3)' }),
+                            stroke: new ol.style.Stroke({ color: isMoving ? 'rgba(255, 0, 0, 0.5)' : 'rgba(0, 255, 0, 0.5)', width: 2 })
+                        }),
+                        zIndex: 0
                     });
-
-                    const satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-                        maxZoom: 19,
-                        attribution: 'Tiles © Esri — Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'
+                    const markerStyle = new ol.style.Style({
+                        image: new ol.style.Circle({
+                            radius: 10,
+                            fill: new ol.style.Fill({ color: isMoving ? 'rgba(255, 0, 0, 0.8)' : 'rgba(0, 255, 0, 0.8)' }),
+                            stroke: new ol.style.Stroke({ color: 'white', width: 2 })
+                        }),
+                        zIndex: 1
                     });
-
-                    const baseMaps = {
-                        "خريطة عادية": standardLayer,
-                        "قمر صناعي": satelliteLayer
-                    };
-
-                    if (mapType === "standard") {
-                        standardLayer.addTo(mapInstance.current);
-                    } else {
-                        satelliteLayer.addTo(mapInstance.current);
-                    }
-                    L.control.layers(baseMaps).addTo(mapInstance.current);
-
-                    const customIcon = L.divIcon({
-                        className: 'custom-marker pulse',
-                        html: '<div style="background: red; width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white;">📍</div>',
-                        iconSize: [20, 20],
-                        iconAnchor: [10, 10]
+                    const labelText = `${selectedDevice?.name || selectedDevice?.uuid}\n${formatLocalTime(currentState.liveLocation?.captured_at || currentState.lastKnownLocation?.captured_at || new Date().toISOString())}`;
+                    const label = new ol.style.Style({
+                        text: new ol.style.Text({
+                            text: labelText,
+                            font: '10px sans-serif',
+                            fill: new ol.style.Fill({ color: 'white' }),
+                            backgroundFill: new ol.style.Fill({ color: 'rgba(0, 0, 0, 0.7)' }),
+                            padding: [2, 6, 2, 6],
+                            offsetY: -40,
+                            textAlign: 'center',
+                            overflow: true
+                        }),
+                        zIndex: 2
                     });
-
-                    markerRef.current = L.marker([lat || 0, lng || 0], { icon: customIcon, draggable: false })
-                        .addTo(mapInstance.current)
-                        .bindPopup('')
-                        .openPopup();
-                    console.log("Map initialized at:", lat, lng);
-                } catch (error) {
-                    console.error("Error initializing map:", error);
-                }
+                    markerFeature.current.setStyle([pulseStyle, markerStyle, label]);
+                    pulseRadius = (pulseRadius === 10) ? 15 : 10;
+                }, 750);
             };
 
             const updateMap = (lat, lng) => {
-                if (mapInstance.current && markerRef.current) {
-                    const newLatLng = L.latLng(lat, lng);
-                    markerRef.current.setLatLng(newLatLng);
-                    if (!mapInstance.current.getBounds().contains(newLatLng)) {
-                        mapInstance.current.setView(newLatLng, 13, { animate: true });
+                if (mapInstance.current && markerFeature.current && lat && lng && !isNaN(lat) && !isNaN(lng) && isMapLoaded) {
+                    const newCoord = ol.proj.fromLonLat([lng, lat]);
+                    markerFeature.current.setGeometry(new ol.geom.Point(newCoord));
+                    updateMarkerStyle();
+                    if (autoZoomEnabled) {
+                        const view = mapInstance.current.getView();
+                        const extent = vectorLayer.current.getSource().getExtent();
+                        if (!ol.extent.containsCoordinate(view.calculateExtent(mapRef.current.getBoundingClientRect()), newCoord)) {
+                            view.animate({
+                                center: newCoord,
+                                zoom: 15,
+                                duration: 500
+                            });
+                        }
                     }
-                    updatePopupTime();
-                }
-            };
-
-            const updatePopupTime = () => {
-                if (markerRef.current) {
-                    const currentState = deviceStates[selectedDevice?.uuid] || {};
-                    markerRef.current.setPopupContent(`الموقع الفعلي<br>التاريخ: ${formatLocalTime(currentState.liveLocation?.captured_at || new Date().toISOString())}`);
+                } else {
+                    console.error("Invalid coordinates, map not ready, or not loaded for updateMap:", lat, lng, isMapLoaded);
                 }
             };
 
             const centerMapOnLocation = (lat, lng) => {
                 if (mapInstance.current && lat && lng && !isNaN(lat) && !isNaN(lng)) {
-                    mapInstance.current.setView([lat, lng], 13, { animate: true });
-                    updatePopupTime();
+                    const view = mapInstance.current.getView();
+                    view.animate({
+                        center: ol.proj.fromLonLat([lng, lat]),
+                        zoom: 15,
+                        duration: 500
+                    });
                 }
             };
 
             const startTimeUpdate = () => {
                 if (timeIntervalRef.current) clearInterval(timeIntervalRef.current);
                 timeIntervalRef.current = setInterval(() => {
-                    if (deviceStates[selectedDevice?.uuid]?.isTracking && mapInstance.current && markerRef.current) {
-                        updatePopupTime();
+                    if (deviceStates[selectedDevice?.uuid]?.isTracking && mapInstance.current && markerFeature.current) {
+                        updateMarkerStyle();
                     }
                 }, 1000);
             };
@@ -362,7 +479,7 @@
                                             lastKnownLocation: { latitude: newLat, longitude: newLng, captured_at: data.captured_at || new Date().toISOString() }
                                         }
                                     }));
-                                    if (deviceStates[selectedDeviceRef.current.uuid]?.isTracking) {
+                                    if (deviceStates[selectedDeviceRef.current.uuid]?.isTracking && mapInstance.current && isMapLoaded) {
                                         updateMap(newLat, newLng);
                                     }
                                 } else {
@@ -414,62 +531,82 @@
                     if (ws) ws.close();
                     stopPolling();
                     stopTimeUpdate();
-                    if (mapInstance.current) {
-                        mapInstance.current.remove();
-                        mapInstance.current = null;
-                    }
+                    if (pulseIntervalRef.current) clearInterval(pulseIntervalRef.current);
+                    if (mapInstance.current) mapInstance.current.setTarget(null);
                 };
             }, []);
 
             useEffect(() => {
-                if (selectedDevice) {
+                if (selectedDevice && mapRef.current && !isMapLoaded) {
                     selectedDeviceRef.current = selectedDevice;
+                    const lastLat = selectedDevice.latitude || 0;
+                    const lastLng = selectedDevice.longitude || 0;
+                    initializeMap(lastLat, lastLng);
                     if (ws && ws.readyState === WebSocket.OPEN) {
                         ws.send(JSON.stringify({ action: "subscribe_to_device", deviceId: selectedDevice.uuid }));
                         console.log("Subscribed to device:", selectedDevice.uuid);
-                        if (mapInstance.current) {
-                            mapInstance.current.remove();
-                            mapInstance.current = null;
-                        }
-                        const lastLat = selectedDevice.latitude || 0;
-                        const lastLng = selectedDevice.longitude || 0;
-                        initializeMap(lastLat, lastLng);
-                        setDeviceStates(prev => ({
-                            ...prev,
-                            [selectedDevice.uuid]: {
-                                ...prev[selectedDevice.uuid],
-                                liveLocation: lastLat && lastLng ? { latitude: lastLat, longitude: lastLng, captured_at: selectedDevice.lastActivity ? new Date(selectedDevice.lastActivity).toISOString() : new Date().toISOString() } : null,
-                                lastKnownLocation: lastLat && lastLng ? { latitude: lastLat, longitude: lastLng, captured_at: selectedDevice.lastActivity ? new Date(selectedDevice.lastActivity).toISOString() : new Date().toISOString() } : null,
-                                isTracking: false
-                            }
-                        }));
-                        console.log("Device state initialized for:", selectedDevice.uuid, deviceStates[selectedDevice.uuid]);
                     }
-                } else if (!selectedDevice && mapInstance.current) {
-                    mapInstance.current.remove();
-                    mapInstance.current = null;
+                    setDeviceStates(prev => ({
+                        ...prev,
+                        [selectedDevice.uuid]: {
+                            ...prev[selectedDevice.uuid],
+                            liveLocation: lastLat && lastLng && !isNaN(lastLat) && !isNaN(lastLng) ? { latitude: lastLat, longitude: lastLng, captured_at: selectedDevice.lastActivity ? new Date(selectedDevice.lastActivity).toISOString() : new Date().toISOString() } : null,
+                            lastKnownLocation: lastLat && lastLng && !isNaN(lastLat) && !isNaN(lastLng) ? { latitude: lastLat, longitude: lastLng, captured_at: selectedDevice.lastActivity ? new Date(selectedDevice.lastActivity).toISOString() : new Date().toISOString() } : null,
+                            isTracking: false
+                        }
+                    }));
+                    updatePulseAnimation();
+                } else if (!selectedDevice && mapRef.current && !isMapLoaded) {
+                    initializeMap(0, 0);
                 }
-            }, [selectedDevice, ws]);
+            }, [selectedDevice, ws, isMapLoaded, mapType]);
+
+            useEffect(() => {
+                if (mapInstance.current && isMapLoaded) {
+                    const layers = mapInstance.current.getLayers().getArray();
+                    layers.forEach(layer => {
+                        if (layer !== vectorLayer.current) {
+                            mapInstance.current.removeLayer(layer);
+                        }
+                    });
+                    const newLayer = new ol.layer.Tile({
+                        source: mapType === "standard" ? new ol.source.OSM() : new ol.source.XYZ({
+                            url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+                            attributions: 'Tiles © Esri — Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'
+                        })
+                    });
+                    mapInstance.current.addLayer(newLayer);
+                    if (vectorLayer.current && markerFeature.current) {
+                        const vectorSource = vectorLayer.current.getSource();
+                        if (!vectorSource.getFeatures().length) {
+                            vectorSource.addFeature(markerFeature.current);
+                        }
+                        vectorLayer.current.setVisible(true);
+                        mapInstance.current.addLayer(vectorLayer.current);
+                    }
+                    updateMarkerStyle();
+                }
+            }, [mapType]);
 
             useEffect(() => {
                 const currentState = deviceStates[selectedDevice?.uuid] || {};
-                console.log("liveLocation:", currentState.liveLocation, "isTracking:", currentState.isTracking);
-                if (currentState.liveLocation && mapInstance.current && markerRef.current && currentState.isTracking) {
-                    console.log("Updating map with live location:", currentState.liveLocation.latitude, currentState.liveLocation.longitude);
+                if (currentState.liveLocation && mapInstance.current && markerFeature.current && isMapLoaded && currentState.isTracking) {
                     updateMap(currentState.liveLocation.latitude, currentState.liveLocation.longitude);
-                } else if (mapInstance.current && markerRef.current && selectedDevice && !currentState.isTracking && currentState.lastKnownLocation) {
+                } else if (mapInstance.current && markerFeature.current && selectedDevice && !currentState.isTracking && currentState.lastKnownLocation) {
                     updateMap(currentState.lastKnownLocation.latitude, currentState.lastKnownLocation.longitude);
                 }
-            }, [deviceStates, selectedDevice]);
+            }, [deviceStates, selectedDevice, isMapLoaded]);
 
             useEffect(() => {
                 const currentState = deviceStates[selectedDevice?.uuid] || {};
                 if (currentState.isTracking) {
                     startTimeUpdate();
+                    updatePulseAnimation();
                 } else {
                     stopTimeUpdate();
-                    if (markerRef.current && currentState.lastKnownLocation) {
-                        updatePopupTime();
+                    if (pulseIntervalRef.current) clearInterval(pulseIntervalRef.current);
+                    if (markerFeature.current && currentState.lastKnownLocation) {
+                        updateMarkerStyle();
                     }
                 }
             }, [deviceStates, selectedDevice]);
@@ -487,23 +624,21 @@
                 setWhatsAppMessages([]);
                 const lastLat = device.latitude || 0;
                 const lastLng = device.longitude || 0;
-                if (mapInstance.current) {
-                    mapInstance.current.remove();
-                    mapInstance.current = null;
-                }
-                initializeMap(lastLat, lastLng);
-                if (!isNaN(lastLat) && !isNaN(lastLng)) {
-                    setDeviceStates(prev => ({
-                        ...prev,
-                        [device.uuid]: {
-                            ...prev[device.uuid],
-                            liveLocation: lastLat && lastLng ? { latitude: lastLat, longitude: lastLng, captured_at: device.lastActivity ? new Date(device.lastActivity).toISOString() : new Date().toISOString() } : null,
-                            lastKnownLocation: lastLat && lastLng ? { latitude: lastLat, longitude: lastLng, captured_at: device.lastActivity ? new Date(device.lastActivity).toISOString() : new Date().toISOString() } : null,
-                            isTracking: false
-                        }
-                    }));
-                } else {
-                    console.error("Invalid latitude or longitude for device:", device.uuid, lastLat, lastLng);
+                if (mapRef.current && !isMapLoaded) {
+                    initializeMap(lastLat, lastLng);
+                    if (!isNaN(lastLat) && !isNaN(lastLng)) {
+                        setDeviceStates(prev => ({
+                            ...prev,
+                            [device.uuid]: {
+                                ...prev[device.uuid],
+                                liveLocation: lastLat && lastLng ? { latitude: lastLat, longitude: lastLng, captured_at: device.lastActivity ? new Date(device.lastActivity).toISOString() : new Date().toISOString() } : null,
+                                lastKnownLocation: lastLat && lastLng ? { latitude: lastLat, longitude: lastLng, captured_at: device.lastActivity ? new Date(device.lastActivity).toISOString() : new Date().toISOString() } : null,
+                                isTracking: false
+                            }
+                        }));
+                    } else {
+                        console.error("Invalid latitude or longitude for device:", device.uuid, lastLat, lastLng);
+                    }
                 }
                 fetchLocations(device.uuid);
                 fetchAudioRecordings(device.uuid);
@@ -541,17 +676,10 @@
                         }
                     }));
                     if (mapInstance.current) {
-                        mapInstance.current.removeLayer(markerRef.current);
-                        const customIcon = L.divIcon({
-                            className: 'custom-marker pulse',
-                            html: '<div style="background: red; width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white;">📍</div>',
-                            iconSize: [20, 20],
-                            iconAnchor: [10, 10]
-                        });
-                        markerRef.current = L.marker([lastLat, lastLng], { icon: customIcon })
-                            .addTo(mapInstance.current)
-                            .bindPopup('')
-                            .openPopup();
+                        const vectorSource = vectorLayer.current.getSource();
+                        vectorSource.clear();
+                        updateMarkerStyle();
+                        vectorSource.addFeature(markerFeature.current);
                     }
                     console.log("Started live tracking for device:", selectedDevice.uuid);
                 }
@@ -571,7 +699,7 @@
                             lastKnownLocation: { latitude: lastLat, longitude: lastLng, captured_at: currentState.liveLocation?.captured_at || new Date().toISOString() }
                         }
                     }));
-                    if (mapInstance.current && markerRef.current) {
+                    if (mapInstance.current && markerFeature.current) {
                         updateMap(lastLat, lastLng);
                         centerMapOnLocation(lastLat, lastLng);
                     }
@@ -678,6 +806,12 @@
                                         <option value="standard">خريطة عادية</option>
                                         <option value="satellite">قمر صناعي</option>
                                     </select>
+                                    <button
+                                        onClick={() => setAutoZoomEnabled(!autoZoomEnabled)}
+                                        className={`px-4 py-2 rounded-lg ${autoZoomEnabled ? 'bg-blue-500' : 'bg-gray-500'} text-white hover:${autoZoomEnabled ? 'bg-blue-600' : 'bg-gray-600'} transition duration-200`}
+                                    >
+                                        {autoZoomEnabled ? 'تعطيل التكبير التلقائي' : 'تفعيل التكبير التلقائي'}
+                                    </button>
                                 </div>
                                 <div ref={mapRef} className="w-full h-96 rounded-lg overflow-hidden" style={{ position: 'relative', minHeight: '400px' }}></div>
                                 <p className="mt-2 text-gray-600">
@@ -968,6 +1102,5 @@
         const root = ReactDOM.createRoot(document.getElementById("root"));
         root.render(<App />);
     </script>
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 </body>
 </html>
