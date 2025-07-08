@@ -1,4 +1,4 @@
- <!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="ar">
 <head>
     <meta charset="UTF-8">
@@ -11,6 +11,9 @@
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.43.4/dist/umd/supabase.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/ol@7.5.0/dist/ol.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.9.0/proj4.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/react-toastify/9.1.3/ReactToastify.min.css" />
+    
+
     <style>
         body {
             background-color: #1a202c;
@@ -26,6 +29,11 @@
             50% { transform: scale(1.5); opacity: 0.3; }
             100% { transform: scale(1); opacity: 1; }
         }
+        @keyframes flash {
+    0% { background-color: rgba(76, 175, 80, 0.9); }
+    50% { background-color: rgba(255, 255, 0, 0.9); }
+    100% { background-color: rgba(76, 175, 80, 0.9); }
+}
         .custom-marker {
             width: 30px;
             height: 30px;
@@ -224,6 +232,7 @@
                     return false;
                 }
             };
+
             const formatLocalTime = (isoString) => {
                 if (!isoString) return "N/A";
                 const date = new Date(isoString);
@@ -302,15 +311,11 @@
         console.error("فشل تهيئة الخريطة الصغيرة: geofenceMapRef أو OpenLayers غير متوفرين");
         return;
     }
-
     if (geofenceMapInstance.current) {
-        geofenceMapInstance.current.setTarget(geofenceMapRef.current);
-        return;
+        geofenceMapInstance.current.setTarget(null);
     }
-
     geofenceVectorSource.current = new ol.source.Vector();
     previewGeofenceFeature.current = new ol.Feature();
-
     const geofenceLayer = new ol.layer.Vector({
         source: geofenceVectorSource.current,
         style: new ol.style.Style({
@@ -323,65 +328,35 @@
             })
         })
     });
-
-    geofenceMapInstance.current = new ol.Map({
-        target: geofenceMapRef.current,
-        layers: [
-            new ol.layer.Tile({
-                source: new ol.source.OSM()
-            }),
-            geofenceLayer
-        ],
-        view: new ol.View({
-            center: ol.proj.fromLonLat([geofenceMapCenter[1], geofenceMapCenter[0]]),
-            zoom: geofenceMapZoom,
-        })
-    });
-
-    // ✅ أضف الكود هنا بعد التأكد أن الخريطة انعملت
-    const drawInteraction = new ol.interaction.Draw({
-    source: geofenceVectorSource.current,
-    type: 'Polygon'
-});
-
-// إضافة الـ Draw Interaction إلى الـ Map
-geofenceMapInstance.current.addInteraction(drawInteraction);
-
-// التعامل مع حدث إنهاء الرسم
-drawInteraction.on('drawend', (event) => {
-    const polygon = event.feature.getGeometry();
-    const coords = polygon.getCoordinates();
-
-    // تحويل جميع الإحداثيات داخل الـ Polygon إلى lon/lat
-    const transformedCoords = coords.map(ring =>
-        ring.map(coord => ol.proj.toLonLat(coord))
-    );
-
-    console.log('Polygon Coordinates (lon/lat):', transformedCoords);
-
-    setDrawnPolygon(transformedCoords);
-});
-
-
-
     const deviceLocationSource = new ol.source.Vector();
-    deviceLocationFeature.current = new ol.Feature();
+    deviceLocationFeature.current = new ol.Feature({
+        geometry: new ol.geom.Point(ol.proj.fromLonLat([0, 0]))
+    });
+    deviceLocationFeature.current.setStyle(new ol.style.Style({
+        image: new ol.style.Circle({
+            radius: 6,
+            fill: new ol.style.Fill({ color: 'red' }),
+            stroke: new ol.style.Stroke({ color: 'white', width: 1 })
+        }),
+        text: new ol.style.Text({
+            text: selectedDevice?.name || selectedDevice?.uuid || 'جهاز',
+            font: '10px sans-serif',
+            fill: new ol.style.Fill({ color: 'white' }),
+            backgroundFill: new ol.style.Fill({ color: 'rgba(0, 0, 0, 0.7)' }),
+            padding: [2, 6, 2, 6],
+            offsetY: -40,
+            textAlign: 'center',
+            overflow: true
+        })
+    }));
     deviceLocationSource.addFeature(deviceLocationFeature.current);
-
     const deviceLocationLayer = new ol.layer.Vector({
         source: deviceLocationSource,
-        style: new ol.style.Style({
-            image: new ol.style.Circle({
-                radius: 6,
-                fill: new ol.style.Fill({ color: 'red' })
-            })
-        })
+        zIndex: 10
     });
-
     const previewSource = new ol.source.Vector({
         features: [previewGeofenceFeature.current]
     });
-
     const previewLayer = new ol.layer.Vector({
         source: previewSource,
         style: new ol.style.Style({
@@ -395,12 +370,22 @@ drawInteraction.on('drawend', (event) => {
             })
         })
     });
-
+    const getGeofenceMapSource = () => {
+        switch (mapType) {
+            case "satellite":
+                return new ol.source.XYZ({
+                    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+                    attributions: 'Tiles © Esri'
+                });
+            default:
+                return new ol.source.OSM();
+        }
+    };
     geofenceMapInstance.current = new ol.Map({
         target: geofenceMapRef.current,
         layers: [
             new ol.layer.Tile({
-                source: new ol.source.OSM()
+                source: getGeofenceMapSource()
             }),
             geofenceLayer,
             previewLayer,
@@ -411,16 +396,20 @@ drawInteraction.on('drawend', (event) => {
             zoom: geofenceMapZoom
         })
     });
-
-    // حفظ center و zoom عند التحريك
-    geofenceMapInstance.current.getView().on('change:center', () => {
-        const centerLonLat = ol.proj.toLonLat(geofenceMapInstance.current.getView().getCenter());
-        setGeofenceMapCenter(centerLonLat);
+    const drawInteraction = new ol.interaction.Draw({
+        source: geofenceVectorSource.current,
+        type: 'Polygon'
     });
-    geofenceMapInstance.current.getView().on('change:zoom', () => {
-        setGeofenceMapZoom(geofenceMapInstance.current.getView().getZoom());
+    geofenceMapInstance.current.addInteraction(drawInteraction);
+    drawInteraction.on('drawend', (event) => {
+        const polygon = event.feature.getGeometry();
+        const coords = polygon.getCoordinates();
+        const transformedCoords = coords.map(ring =>
+            ring.map(coord => ol.proj.toLonLat(coord))
+        );
+        console.log('Polygon Coordinates (lon/lat):', transformedCoords);
+        setDrawnPolygon(transformedCoords);
     });
-
     geofenceMapInstance.current.on('singleclick', (e) => {
         const coord = geofenceMapInstance.current.getCoordinateFromPixel(e.pixel);
         const [longitude, latitude] = ol.proj.toLonLat(coord);
@@ -429,89 +418,144 @@ drawInteraction.on('drawend', (event) => {
             latitude,
             longitude
         }));
-
         previewGeofenceFeature.current.setGeometry(
             new ol.geom.Circle(coord, geofenceSettings.radius)
         );
     });
 
+    // تحديث موقع الجهاز بناءً على آخر موقع معروف أو من locations
+    const currentState = deviceStates[selectedDevice?.uuid] || {};
+    let location = currentState.liveLocation || currentState.lastKnownLocation;
+    
+    if (!location && locations.length > 0) {
+        location = locations[0];
+    }
+
+    if (location && location.latitude && location.longitude) {
+        const coords = ol.proj.fromLonLat([location.longitude, location.latitude]);
+        deviceLocationFeature.current.setGeometry(new ol.geom.Point(coords));
+        deviceLocationFeature.current.setStyle(new ol.style.Style({
+            image: new ol.style.Circle({
+                radius: 6,
+                fill: new ol.style.Fill({ color: 'red' }),
+                stroke: new ol.style.Stroke({ color: 'white', width: 1 })
+            }),
+            text: new ol.style.Text({
+                text: `${selectedDevice?.name || selectedDevice?.uuid}\n${formatLocalTime(location.captured_at)}`,
+                font: '10px sans-serif',
+                fill: new ol.style.Fill({ color: 'white' }),
+                backgroundFill: new ol.style.Fill({ color: 'rgba(0, 0, 0, 0.7)' }),
+                padding: [2, 6, 2, 6],
+                offsetY: -40,
+                textAlign: 'center',
+                overflow: true
+            })
+        }));
+        if (geofences.length === 0) {
+            geofenceMapInstance.current.getView().animate({
+                center: coords,
+                zoom: 14,
+                duration: 1000
+            });
+            setGeofenceMapCenter([location.longitude, location.latitude]);
+            setGeofenceMapZoom(14);
+        }
+    }
+
     updateGeofenceMap();
-    updateDeviceLocationOnGeofenceMap();
+    geofenceMapInstance.current.render();
     geofenceMapInitialized.current = true;
 };
 
+useEffect(() => {
+    if (geofenceMapInstance.current && geofenceMapInitialized.current) {
+        const layers = geofenceMapInstance.current.getLayers().getArray();
+        let tileLayer = layers.find(layer => layer instanceof ol.layer.Tile);
+        if (tileLayer) {
+            geofenceMapInstance.current.removeLayer(tileLayer);
+        }
+        const newTileLayer = new ol.layer.Tile({
+            source: getMapSource(mapType)
+        });
+        geofenceMapInstance.current.addLayer(newTileLayer);
+        geofenceMapInstance.current.render();
+    }
+}, [mapType]);
+
             const updateGeofenceMap = () => {
     if (!geofenceVectorSource.current || !geofenceMapInstance.current) return;
-
     geofenceVectorSource.current.clear();
     geofenceFeatures.current = {};
-
     geofences.forEach(gf => {
-    let geometry;
-
-    if (gf.polygon_geometry) {
-        geometry = new ol.geom.Polygon(
-            gf.polygon_geometry.coordinates.map(ring =>
-                ring.map(coord => ol.proj.fromLonLat(coord))
-            )
-        );
-    } else {
-        geometry = new ol.geom.Circle(
-            ol.proj.fromLonLat([gf.longitude, gf.latitude]),
-            gf.radius
-        );
-    }
-
-    const style = new ol.style.Style({
-        stroke: new ol.style.Stroke({
-            color: 'rgba(255, 255, 0, 0.7)',
-            width: 2
-        }),
-        fill: new ol.style.Fill({
-            color: `rgba(${Math.floor(Math.random() * 255)}, ${Math.floor(Math.random() * 255)}, ${Math.floor(Math.random() * 255)}, 0.2)`
-        }),
-        text: new ol.style.Text({
-    text: gf.name,
-    font: '13px sans-serif',
-    fill: new ol.style.Fill({ color: 'white' }),
-    backgroundFill: new ol.style.Fill({ color: 'rgba(0, 0, 0, 0.6)' }),
-    padding: [2, 4, 2, 4],
-    textAlign: 'center',
-    offsetY: -10,
-    overflow: true,
-    scale: 1.2
-})
-
+        let geometry;
+        if (gf.polygon_geometry) {
+            geometry = new ol.geom.Polygon(
+                gf.polygon_geometry.coordinates.map(ring =>
+                    ring.map(coord => ol.proj.fromLonLat(coord))
+                )
+            );
+        } else {
+            geometry = new ol.geom.Circle(
+                ol.proj.fromLonLat([gf.longitude, gf.latitude]),
+                gf.radius
+            );
+        }
+        const style = new ol.style.Style({
+            stroke: new ol.style.Stroke({
+                color: 'rgba(255, 255, 0, 0.7)',
+                width: 2
+            }),
+            fill: new ol.style.Fill({
+                color: `rgba(${Math.floor(Math.random() * 255)}, ${Math.floor(Math.random() * 255)}, ${Math.floor(Math.random() * 255)}, 0.2)`
+            }),
+            text: new ol.style.Text({
+                text: gf.name,
+                font: '13px sans-serif',
+                fill: new ol.style.Fill({ color: 'white' }),
+                backgroundFill: new ol.style.Fill({ color: 'rgba(0, 0, 0, 0.6)' }),
+                padding: [2, 4, 2, 4],
+                textAlign: 'center',
+                offsetY: -10,
+                overflow: true,
+                scale: 1.2
+            })
+        });
+        const feature = new ol.Feature({
+            geometry,
+            name: gf.name
+        });
+        feature.setStyle(style);
+        geofenceVectorSource.current.addFeature(feature);
+        geofenceFeatures.current[gf.id] = feature;
     });
-
-    const feature = new ol.Feature({
-        geometry,
-        name: gf.name
-    });
-
-    feature.setStyle(style);
-    geofenceVectorSource.current.addFeature(feature);
-    geofenceFeatures.current[gf.id] = feature;
-});
-
-// تكبير تلقائي ليظهر جميع المناطق
-if (geofenceVectorSource.current.getFeatures().length > 0) {
-    setTimeout(() => {
+    if (geofenceVectorSource.current.getFeatures().length > 0) {
         const extent = geofenceVectorSource.current.getExtent();
-        if (extent && !ol.extent.isEmpty(extent)) {
+        if (!ol.extent.isEmpty(extent)) {
             geofenceMapInstance.current.getView().fit(extent, {
                 padding: [50, 50, 50, 50],
                 duration: 1000,
-                maxZoom: 16
+                maxZoom: 16,
+                minZoom: 10
             });
-
             const view = geofenceMapInstance.current.getView();
             setGeofenceMapCenter(ol.proj.toLonLat(view.getCenter()));
             setGeofenceMapZoom(view.getZoom());
         }
-    }, 200);
-}
-
+    } else {
+        const currentState = deviceStates[selectedDevice?.uuid] || {};
+        const location = currentState.liveLocation || currentState.lastKnownLocation;
+        if (location && location.latitude && location.longitude) {
+            const coords = ol.proj.fromLonLat([location.longitude, location.latitude]);
+            geofenceMapInstance.current.getView().animate({
+                center: coords,
+                zoom: 14,
+                duration: 1000
+            });
+            setGeofenceMapCenter([location.longitude, location.latitude]);
+            setGeofenceMapZoom(14);
+        }
+    }
+    geofenceMapInstance.current.render();
 };
 
 const fetchGeofenceEvents = async () => {
@@ -528,40 +572,47 @@ const fetchGeofenceEvents = async () => {
 
 
 const updateDeviceLocationOnGeofenceMap = () => {
-    if (!deviceLocationFeature.current) return;
-
+    if (!deviceLocationFeature.current || !geofenceMapInstance.current) return;
     const currentState = deviceStates[selectedDevice?.uuid] || {};
-    const location = currentState.liveLocation || currentState.lastKnownLocation;
+    let location = currentState.liveLocation || currentState.lastKnownLocation;
+
+    // إذا لم يكن هناك liveLocation أو lastKnownLocation، استخدم أحدث موقع من locations
+    if (!location && locations.length > 0) {
+        location = locations[0]; // أحدث موقع من جدول locations
+    }
 
     if (location && location.latitude && location.longitude) {
-        const coords = ol.proj.fromLonLat([
-            location.longitude,
-            location.latitude
-        ]);
-        deviceLocationFeature.current.setGeometry(
-            new ol.geom.Point(coords)
-        );
-
-        const view = geofenceMapInstance.current?.getView();
-        if (view) {
-            if (view.getZoom() < 10) {
-                view.animate({
-                    center: coords,
-                    zoom: 14,
-                    duration: 1000
-                });
-            } else {
-                view.animate({
-                    center: coords,
-                    duration: 500
-                });
-            }
-
-            setGeofenceMapCenter(ol.proj.toLonLat(coords));
-            setGeofenceMapZoom(view.getZoom());
+        const coords = ol.proj.fromLonLat([location.longitude, location.latitude]);
+        deviceLocationFeature.current.setGeometry(new ol.geom.Point(coords));
+        deviceLocationFeature.current.setStyle(new ol.style.Style({
+            image: new ol.style.Circle({
+                radius: 6,
+                fill: new ol.style.Fill({ color: 'red' }),
+                stroke: new ol.style.Stroke({ color: 'white', width: 1 })
+            }),
+            text: new ol.style.Text({
+                text: `${selectedDevice?.name || selectedDevice?.uuid}\n${formatLocalTime(location.captured_at)}`,
+                font: '10px sans-serif',
+                fill: new ol.style.Fill({ color: 'white' }),
+                backgroundFill: new ol.style.Fill({ color: 'rgba(0, 0, 0, 0.7)' }),
+                padding: [2, 6, 2, 6],
+                offsetY: -40,
+                textAlign: 'center',
+                overflow: true
+            })
+        }));
+        if (geofences.length === 0) {
+            geofenceMapInstance.current.getView().animate({
+                center: coords,
+                zoom: 14,
+                duration: 1000
+            });
+            setGeofenceMapCenter([location.longitude, location.latitude]);
+            setGeofenceMapZoom(14);
         }
+        geofenceMapInstance.current.render();
     }
-};
+};;
 
 const clearDrawnPolygon = () => {
     if (geofenceVectorSource.current) {
@@ -625,10 +676,7 @@ const savePolygonGeofence = async () => {
             const checkGeofenceWithServices = (lat, lng, capturedAt) => {
     if (!selectedDevice) return;
 
-    const point = new ol.geom.Point(
-        ol.proj.fromLonLat([lng, lat])
-    );
-
+    const point = new ol.geom.Point(ol.proj.fromLonLat([lng, lat]));
     let foundGeofence = null;
 
     for (const gf of geofences) {
@@ -672,17 +720,31 @@ const savePolygonGeofence = async () => {
 
         if (message) {
             setGeofenceNotification(message);
+            // تشغيل صوت التنبيه
+            const audio = new Audio('https://www.soundjay.com/buttons/beep-01a.mp3');
+            audio.play().catch(error => console.error('خطأ في تشغيل الصوت:', error));
+            // إضافة تأثير وميض مرئي
+            setTimeout(() => {
+                const notificationElement = document.querySelector('.geofence-notification');
+                if (notificationElement) {
+                    notificationElement.style.animation = 'flash 0.5s ease-in-out 3';
+                    setTimeout(() => {
+                        notificationElement.style.animation = '';
+                    }, 1500); // إزالة التأثير بعد 1.5 ثانية
+                } else {
+                    console.warn('لم يتم العثور على عنصر .geofence-notification');
+                }
+            }, 100); // تأخير طفيف لضمان عرض العنصر
             setTimeout(() => setGeofenceNotification(null), 5000);
 
             if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({
-        action: "geofence_trigger",
-        deviceId: selectedDevice.uuid,
-        message: message,
-        location: { lat, lng }
-    }));
-}
-
+                ws.send(JSON.stringify({
+                    action: "geofence_trigger",
+                    deviceId: selectedDevice.uuid,
+                    message: message,
+                    location: { lat, lng }
+                }));
+            }
 
             supabase.from('geofence_events').insert({
                 device_id: selectedDevice.uuid,
@@ -707,9 +769,7 @@ const savePolygonGeofence = async () => {
     // تحديث موقع الجهاز في الخريطة الصغيرة
     if (deviceLocationFeature.current) {
         const coords = ol.proj.fromLonLat([lng, lat]);
-        deviceLocationFeature.current.setGeometry(
-            new ol.geom.Point(coords)
-        );
+        deviceLocationFeature.current.setGeometry(new ol.geom.Point(coords));
         if (!geofenceVectorSource.current.getFeatures().includes(deviceLocationFeature.current)) {
             geofenceVectorSource.current.addFeature(deviceLocationFeature.current);
         }
@@ -722,8 +782,7 @@ const savePolygonGeofence = async () => {
             });
         }
 
-
-
+        
     // تحديث الحالة
     setGeofenceStatus(prev => ({
         ...prev,
@@ -1084,6 +1143,7 @@ const savePolygonGeofence = async () => {
                     stopPolling();
                     socket.send(JSON.stringify({ action: "dashboard_connect" }));
                 };
+
                 socket.onmessage = (event) => {
                     console.log("الجهاز المختار:", selectedDeviceRef.current?.uuid);
                     console.log("تم استلام رسالة WebSocket (غير مفككة):", event.data);
@@ -1238,7 +1298,6 @@ useEffect(() => {
         supabase.removeChannel(channel);
     };
 }, []);
-
 
 
             useEffect(() => {
@@ -1466,7 +1525,7 @@ useEffect(() => {
                 }
             };
             return (
-                <div className="min-h-screen p-6 text-gray-100">
+                    <div className="min-h-screen p-6 text-gray-100">
                     {geofenceNotification && (
                         <div className="geofence-notification">
                             {geofenceNotification}
@@ -1987,6 +2046,14 @@ useEffect(() => {
                                     <div className="mb-4">
                                         <div className="geofence-map-container">
                                             <div ref={geofenceMapRef} className="w-full h-full rounded-lg overflow-hidden"></div>
+                                            <select
+        value={mapType}
+        onChange={(e) => setMapType(e.target.value)}
+        className="absolute top-2 left-2 p-2 border border-gray-600 rounded-lg bg-gray-700 text-white z-1000"
+    >
+        <option value="standard">خريطة قياسية</option>
+        <option value="satellite">قمر صناعي</option>
+    </select>
                                             <div className="geofence-info">
                                                 <p>انقر على الخريطة لتحديد مركز المنطقة</p>
                                                 <p className="mt-1">مركز: {geofenceSettings.latitude.toFixed(6)}, {geofenceSettings.longitude.toFixed(6)}</p>
@@ -2098,8 +2165,36 @@ useEffect(() => {
         };
         
 
-        const root = ReactDOM.createRoot(document.getElementById('root'));
+        class ErrorBoundary extends React.Component {
+    constructor(props) {
+        super(props);
+        this.state = { hasError: false, error: null };
+    }
+
+    static getDerivedStateFromError(error) {
+        return { hasError: true, error };
+    }
+
+    render() {
+        if (this.state.hasError) {
+            return (
+                <div className="text-red-500 p-4">
+                    <h2>حدث خطأ</h2>
+                    <p>{this.state.error?.message}</p>
+                </div>
+            );
+        }
+        return this.props.children;
+    }
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(
+    <ErrorBoundary>
+        <App />
+    </ErrorBoundary>
+);
 root.render(<App />);
     </script>
-</body>
+<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'95bf0e7b1e860c99',t:'MTc1MTk3MjIwMi4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
